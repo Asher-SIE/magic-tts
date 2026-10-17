@@ -1,2 +1,4 @@
 build/
 .DS_Store
+resources/yongde/voices/*.vl
+resources/reference/tts.apk

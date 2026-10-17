@@ -45,10 +45,10 @@ open -a ~/Applications/MagicTTS.app
 
 ## 引擎数据
 
-位置：`~/Library/Group Containers/com.magictts.shared/Engines/<key>/`
+运行位置：`~/Library/Group Containers/com.magictts.shared/Engines/<key>/`
 
 ```bash
-./scripts/populate-engines.sh             # 从既有 Engines 目录复制三引擎数据
+./scripts/populate-engines.sh             # yongde←项目资源; MS←旧容器或从零
 ./scripts/fetch-ms-sdk.sh                 # 从零: 下载微软 Speech SDK 运行库
 ./scripts/fetch-voice-models.sh <用户名> <密码>   # 从零: 下载语音包
 ```
@@ -56,6 +56,22 @@ open -a ~/Applications/MagicTTS.app
 - `yongde/`: `voices/ydvoice00.vl`（24B 头 + 24576×8B 稀疏索引 + PCM）+
   `pinyin.txt`（41923 字）+ `phrases.txt`（47120 词组）
 - `naturalvoice|onecore/`: 3 个 dylib + `model/<包>/` + `voice.txt`
+
+## 项目内资源（自包含，不再依赖旧工作区素材）
+
+```
+resources/
+├── yongde/
+│   ├── voices/ydvoice00-04.vl   # 全部 5 个音色语音库 (~51M, 未入 git)
+│   ├── pinyin.txt / phrases.txt # 拼音词典
+│   └── libyongde_tts.so         # Android arm64 引擎本体 (二期逆向参考: Sonic 变速/多音色)
+└── reference/
+    ├── tts.apk                  # 原始 APK (347M, 未入 git) — 一切素材的最终出处
+    └── restored*/               # Android 调用链 Java 还原源 (注释出处引用)
+```
+
+永德数据以 `resources/yongde` 为权威源，`populate-engines.sh` 默认从这里安装；
+MS 引擎数据体量大（870M），不入项目目录，由组容器 + 下载脚本承担。
 
 ## CLI 快速验证
 
