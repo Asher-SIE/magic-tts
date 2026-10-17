@@ -22,6 +22,23 @@ TTS 引擎注册为系统语音（VoiceOver / 朗读内容 / `say` 均可用）�
   `voice.txt`（完整语音名）可指定该引擎的默认发音人。语音 locale 按包目录名
   尾段解析（en-US/zh-TW 等），未知回退引擎级。
 
+## 语音方案（中英自动分发）
+
+系统语音目录里另有**固定槽位**「双语方案·一 / 双语方案·二」：一次朗读内按文字
+自动切换主（中文）/副（英文）发音人——中文段、英文段、数字、孤立字母各走各的
+音色，段与段无缝拼接（相邻段必不同侧，这是 MS 会话串行的前提，切段器保证）。
+
+- **分发规则**：`Shared/TextSegmenter.swift`（normalize → splitRuns → route →
+  attach → merge 五段流水，特殊情况在此按条增改）；规则开关随 scheme.json 持久化。
+- **参数完全 MagicTTS 托管**：方案语音忽略请求里的 prosody（VO 面板对方案本就
+  无效），语速/音高/音量两侧各自独立，音量 = 渲染级逐样本增益（0-200%，兼做
+  响度归一；>100% 可能削顶）。
+- **配置热生效**：槽位在 speechVoices 里固定注册（语音目录对未变化的 app 不重查，
+  固定槽位只注册一次）；实际映射存 `Engines/scheme.json`，**每次请求时读取**，
+  App 方案编辑器改完即生效，无需重装。文件缺失/损坏/单槽位坏 → 逐项回退默认。
+- 逐段流水线：启动线程领先渲染位置 1 段预热下一段，消除段间切换静默；跨采样率
+  段（永德 16k ↔ MS 24k）按段切换重采样率。
+
 > **流式与延迟**（2026-10-17 实测）：MS 引擎改为 `start_speaking_ssml` + wav 文件
 > 跟随的流式架构——首块音频 ~0.73s（模型首次推理）后即开始朗读，合成以 ~1.6×
 > 实时供给；appex 进程与合成会话跨句复用，首句之后即热。旧架构需等整段合成
@@ -31,9 +48,9 @@ TTS 引擎注册为系统语音（VoiceOver / 朗读内容 / `say` 均可用）�
 ## 目录结构
 
 ```
-App/            SwiftUI 宿主（引擎状态表 + 试听 + 刷新注册）
-Extension/      AU 扩展（MagicSpeechProviderAU + SSML 解析）
-Shared/         App Group 路径约定
+App/            SwiftUI 宿主（引擎状态表 + 方案编辑/试听 + 刷新注册）
+Extension/      AU 扩展（MagicSpeechProviderAU 段队列渲染 + SSML 解析）
+Shared/         App Group 路径约定 / Scheme 方案模型 / TextSegmenter 分发规则
 Bridge/         C 引擎桥（路由 + 各引擎适配器）
 Entitlements/   沙盒 + App Group
 scripts/        构建 / 数据安装 / 下载 / 诊断工具
@@ -105,10 +122,12 @@ clang -std=c11 -IBridge/include -o /tmp/mtts_cli scripts/test_cli.c Bridge/*.c -
 MT_ENGINES="$HOME/Library/Containers/com.magictts.voices.synth/Data/Engines" \
   /tmp/mtts_cli yongde "中东西通红龙用"
 say -v '永德·语音0' "中东西通红龙用"
+say -v '双语方案·一' "中文与English混读，NVDA version 3.14，字母Z分组。"
 ```
 
-每次合成会在 `Engines/.debug/last_<key>.wav` 留下引擎侧输出，用于与宿主收到的
-音频比对（相差应仅为 float 往返 1 LSB）。
+调试转储**默认关闭**（正式路径零磁盘 IO）。需要引擎侧 WAV 比对时：
+`touch <容器>/Engines/.debug/dump`，之后每次合成在 `Engines/.debug/last_<n>.wav`
+留下渲染侧输出（轮转 8 个）。
 
 ## 已知坑
 

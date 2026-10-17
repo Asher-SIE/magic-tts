@@ -26,7 +26,7 @@
    Data 本身; 宿主/CLI 内才是真实家目录。同一条相对路径在两侧指向不同物理
    位置 (appex 侧会得到容器内嵌套路径)。
 
-## 二、两条代码不变量 (违反即复现本次事故)
+## 二、代码不变量 (违反即复现事故)
 
 1. `speechVoices` getter 必须在**零文件可用**时仍返回非空表 (静态兜底,
    `MagicSpeechProviderAU.staticVoices`)。合成端对未知 voiceKey 自动回退
@@ -34,6 +34,16 @@
 2. 引擎路径必须按进程上下文解析 (`MagicPaths.appexContainerData` 按
    `Bundle.main.bundleIdentifier` 分流)。AU 构造期只做轻量扫描, 引擎预热
    由 `mtts_stream_start` 首次合成懒加载。
+3. **方案槽位固定、映射热读** (2026-10-17 双语方案): 目录对未变化的 app
+   不重查 → 方案条目 ("双语方案·一/二") 必须固定出现在 speechVoices 与
+   staticVoices; 槽位→发音人/参数映射存 `Engines/scheme.json`, **每次请求时
+   读取**。新增方案槽位属列表变更, 需重装 app 触发重扫 (一次性)。
+4. **相邻段必不同侧** (段队列前提): TextSegmenter 合并同侧相邻段, 保证方案
+   朗读的相邻两段必不同发音人 — MS 适配器要求每 voice 会话串行 (launch 前
+   stop+复位拍), 同 voice 并发流会互相破坏。改切段器时不可破坏此性质。
+5. 方案语音忽略请求 prosody (VO 面板对 provider 语音的语速/音高天然无效,
+   实测 macOS 26 请求仅 ssmlRepresentation + voice), 语速/音高/音量全部由
+   scheme.json 托管; 音量 = 渲染级逐样本增益 (0-200%, >100% 可能削顶)。
 
 ## 三、排障手册 (症状 → 定位)
 

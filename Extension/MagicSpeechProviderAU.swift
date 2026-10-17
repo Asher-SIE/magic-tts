@@ -10,6 +10,11 @@ import Foundation
 ///
 /// 流式: 请求线程 start (毫秒级返回), 渲染块按帧从 mtts_stream 拉取重采样.
 /// MS 引擎首块音频 ~0.8s 到达 (模型首次推理), 之后 ~1.6× 实时供给.
+///
+/// 段队列 (双语方案): 一次请求切分为多段, 每段一个引擎流, 逐段拉尽切换;
+/// 相邻段必不同侧 (TextSegmenter 合并同侧相邻段), 故 MS 同一 voice 会话
+/// 永远不会出现并发流 (ms 适配器要求每 voice 串行, launch 前 stop+复位拍).
+/// 启动线程领先渲染位置 1 段流水线预热, 消除段间切换静默.
 public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
 
     // MARK: - 调试探针 (统一日志对未签名构建不可用 → 写文件)
@@ -45,21 +50,39 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
         }
     }
 
-    // MARK: - 请求/流状态 (请求线程写, 渲染线程读)
+    // MARK: - 段队列状态 (stateLock 保护; 渲染线程读, 请求/启动线程写)
+
+    /// 一段 = 一个引擎流. gain 为渲染级逐样本增益 (方案音量).
+    private struct SegPlan {
+        let engine: String
+        let voice: String?      // nil = 引擎默认发音人
+        let text: String
+        let rate: Int32
+        let pitch: Int32
+        let gain: Float
+    }
 
     private let stateLock = NSLock()
-    private var stream: OpaquePointer?      // mtts_stream* (当前)
-    private var retired: [OpaquePointer] = []   // 已取消待释放 (渲染线程释放)
-    private var streamRate: Int32 = 24000   // 当前流引擎采样率
-    private var gen: UInt64 = 0             // 请求代际 (渲染侧据此复位缓冲)
-    private var pending = false             // 请求已接受, 流未就绪 (start 毫秒级)
+    private var plans: [SegPlan] = []
+    private var streams: [OpaquePointer?] = []   // 已启动的流 (nil = 未启动或失败)
+    private var started: [Bool] = []             // 已尝试启动
+    private var rates: [Int32] = []              // 各段引擎采样率
+    private var nextToStart = 0                  // 启动线程游标
+    private var currentIdx = 0                   // 渲染游标
+    private var retired: [OpaquePointer] = []    // 已取消/读尽待释放 (渲染线程释放)
+    private var gen: UInt64 = 0                  // 请求代际 (渲染侧据此复位缓冲)
+    private var pending = false                  // 请求已接受, 第 0 段未启动完
     private var cancelled = true
+    private var dumpAudio = false                // .debug/dump 存在时写调试 WAV
+
+    private let starterQueue = DispatchQueue(label: "magictts.segstart")
 
     // 渲染线程私有 (仅 render block 触碰)
     private var srcBuf: [Float] = []        // 引擎采样率 Float32 累积缓冲
     private var srcPos: Double = 0          // 消费位置 (srcBuf 索引空间, 小数步进)
     private var curGen: UInt64 = 0
     private var curRate: Double = 24000
+    private var dumpActive = false
     private var dbg: [Float] = []
     private var dbgRate: Int = 24000
 
@@ -85,13 +108,15 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
     }
 
     deinit {
-        if let s = stream { mtts_stream_cancel(s); mtts_stream_free(s) }
+        for s in streams {
+            if let s { mtts_stream_cancel(s); mtts_stream_free(s) }
+        }
         for s in retired { mtts_stream_free(s) }
     }
 
     // MARK: - Speech Synthesis Provider (核心三件套)
 
-    /// 声明语音: 每个引擎的每个发音人一条 (identifier = com.magictts.<engine>.<voicekey>).
+    /// 声明语音: 每个引擎的每个发音人一条 + 双语方案槽位.
     /// 调试: Engines/voicemode.txt (1=旧3条 2=仅永德 3=全部, 默认3) — 注册机制排查用.
     public override var speechVoices: [AVSpeechSynthesisProviderVoice] {
         get {
@@ -136,6 +161,17 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
                         supportedLanguages: [lang]))
                 }
             }
+            /* 双语方案槽位: 固定注册 (目录对未变化的 app 不重查);
+             * 槽位→实际发音人映射在请求时读 scheme.json, 改配置即时生效. */
+            if mode >= 2 {
+                for slot in SchemeStore.slots {
+                    voices.append(AVSpeechSynthesisProviderVoice(
+                        name: SchemeStore.slotNames[slot] ?? slot,
+                        identifier: "com.magictts.scheme.\(slot)",
+                        primaryLanguages: ["zh-CN"],
+                        supportedLanguages: ["zh-CN", "en-US"]))
+                }
+            }
             /* 静态兜底: 语音目录枚举在系统守护进程内 in-process 实例化 AU,
              * 那里读不了 appex 容器 → 扫描必为空。没有兜底时 getter 在枚举上下文
              * 永远返回空表 = 发音人从不注册 (2026-10-17 回归根因)。
@@ -154,9 +190,9 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
         set {}   // ObjC 属性可仅覆写 getter; 系统不写此属性
     }
 
-    /// 静态发音人表 = 标准物料布局的固定集合 (永德 5 音色 + MS 每引擎默认 1 发音人).
-    /// 永德键与 .vl 文件名一致; MS 用无键 id (解析得 voiceKey=nil → 默认包),
-    /// 故无论实际装了哪些包, 兜底 id 均可被合成端解析.
+    /// 静态发音人表 = 标准物料布局的固定集合 (永德 5 音色 + MS 每引擎默认 1 发音人
+    /// + 双语方案槽位). 永德键与 .vl 文件名一致; MS 用无键 id (解析得 voiceKey=nil
+    /// → 默认包), 故无论实际装了哪些包, 兜底 id 均可被合成端解析.
     private static let staticVoices: [AVSpeechSynthesisProviderVoice] = {
         func v(_ name: String, _ id: String) -> AVSpeechSynthesisProviderVoice {
             AVSpeechSynthesisProviderVoice(
@@ -168,41 +204,73 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
         }
         list.append(v("自然语音·晓晓 HD", "com.magictts.naturalvoice"))
         list.append(v("OneCore·晓晓 HD", "com.magictts.onecore"))
+        for slot in SchemeStore.slots {
+            list.append(AVSpeechSynthesisProviderVoice(
+                name: SchemeStore.slotNames[slot] ?? slot,
+                identifier: "com.magictts.scheme.\(slot)",
+                primaryLanguages: ["zh-CN"],
+                supportedLanguages: ["zh-CN", "en-US"]))
+        }
         return list
     }()
 
-    /// 合成请求 — 系统送来 SSML + voice. 流式启动 (毫秒级), 渲染块拉取.
+    /// 合成请求 — 系统送来 SSML + voice. 方案语音切段分发, 普通语音单段直通.
     public override func synthesizeSpeechRequest(_ request: AVSpeechSynthesisProviderRequest) {
         let parsed = SpeechRequestParser.parse(request.ssmlRepresentation)
         let (engineKey, voiceKey) = Self.parseVoiceId(request.voice.identifier)
 
-        NSLog("[MagicTTS] synthesize engine=\(engineKey) voice=\(voiceKey ?? "(默认)") rate=\(parsed.rate) pitch=\(parsed.pitch) text=\(parsed.text.prefix(32))")
-
-        // 旧流退休 (cancel 立即; 释放留给渲染线程, 避免与在途 read 竞争)
-        stateLock.lock()
-        if let old = stream { mtts_stream_cancel(old); retired.append(old) }
-        stream = nil
-        gen &+= 1
-        pending = true
-        cancelled = false
-        stateLock.unlock()
-
-        var sr: Int32 = 0
-        guard let st = mtts_stream_start(engineKey, voiceKey, parsed.text,
-                                         Int32(parsed.rate), Int32(parsed.pitch), &sr) else {
-            NSLog("[MagicTTS] stream_start 失败 (engine=\(engineKey) voice=\(voiceKey ?? "-"))")
-            stateLock.lock()
-            pending = false
-            cancelled = true
-            stateLock.unlock()
-            return
+        var newPlans: [SegPlan] = []
+        if engineKey == "scheme", let slot = voiceKey, SchemeStore.slotNames[slot] != nil {
+            let scheme = SchemeStore.loadAll()[slot] ?? SchemeStore.defaults()[slot]!
+            let p = SchemeStore.resolve(scheme.primary)
+            let s = SchemeStore.resolve(scheme.secondary)
+            /* 方案语音: 语速/音高/音量全部 MagicTTS 托管 (scheme.json),
+             * 忽略请求里的 prosody — VO 面板对方案本就无效, 不做跟随. */
+            newPlans = TextSegmenter.segment(parsed.text, options: scheme.rules).map { seg in
+                let isPrimary = seg.target == .primary
+                let side = isPrimary ? scheme.primary : scheme.secondary
+                let r = isPrimary ? p : s
+                return SegPlan(engine: r.engine, voice: r.voice, text: seg.text,
+                               rate: Int32(side.rate), pitch: Int32(side.pitch),
+                               gain: Float(side.volume) / 100.0)
+            }
+            NSLog("[MagicTTS] scheme=\(slot) 主=\(p.engine) 副=\(s.engine) → \(newPlans.count) 段 text=\(parsed.text.prefix(32))")
+        } else {
+            newPlans = [SegPlan(engine: engineKey, voice: voiceKey, text: parsed.text,
+                                rate: Int32(parsed.rate), pitch: Int32(parsed.pitch), gain: 1.0)]
+            NSLog("[MagicTTS] synthesize engine=\(engineKey) voice=\(voiceKey ?? "(默认)") rate=\(parsed.rate) text=\(parsed.text.prefix(32))")
         }
 
+        // 旧队列退休 (cancel 立即; 释放留给渲染线程, 避免与在途 read 竞争)
         stateLock.lock()
-        stream = st
-        streamRate = sr
-        pending = false
+        for i in streams.indices {
+            if let s = streams[i] { mtts_stream_cancel(s); retired.append(s); streams[i] = nil }
+        }
+        plans = []; streams = []; started = []; rates = []
+        nextToStart = 0; currentIdx = 0
+        gen &+= 1
+        cancelled = newPlans.isEmpty     // 空文本 → 渲染立即 Complete
+        pending = !newPlans.isEmpty
+        dumpAudio = FileManager.default.fileExists(
+            atPath: MagicPaths.enginesRoot.appendingPathComponent(".debug/dump").path)
+        if !newPlans.isEmpty {
+            plans = newPlans
+            streams = [OpaquePointer?](repeating: nil, count: plans.count)
+            started = [Bool](repeating: false, count: plans.count)
+            rates = [Int32](repeating: 24000, count: plans.count)
+        }
+        let g = gen
         stateLock.unlock()
+
+        guard !newPlans.isEmpty else { return }
+
+        // 同步启动第 0 段 (pending 就此解除; MS 会话含 stop+复位拍 ~150ms)
+        let idx0 = popLaunchIndex()
+        if idx0 >= 0 {
+            launchSegment(idx0, requestGen: g)
+        }
+        stateLock.lock(); pending = false; stateLock.unlock()
+        scheduleStarter()   // 后续段流水线启动 (领先渲染位置 1 段)
     }
 
     /// identifier → (engineKey, voiceKey?).
@@ -220,17 +288,80 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
         return (String(engine), voice)
     }
 
-    /// 停止.
+    /// 停止: 取消全部段.
     public override func cancelSpeechRequest() {
         NSLog("[MagicTTS] cancel")
         stateLock.lock()
         cancelled = true
         pending = false
-        if let s = stream { mtts_stream_cancel(s) }
+        for i in streams.indices {
+            if let s = streams[i] { mtts_stream_cancel(s); retired.append(s); streams[i] = nil }
+        }
         stateLock.unlock()
     }
 
-    // MARK: - 渲染 (流式: 按需拉取 + 线性重采样, 结束置 Complete 标志)
+    // MARK: - 段启动 (请求线程同步起第 0 段; 后续段由 starter 流水线起)
+
+    /// 取下一个待启动段 (须 ≤ 渲染位置+1, 保持流水线深度 1). 无 → -1.
+    private func popLaunchIndex() -> Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        if cancelled { return -1 }
+        guard nextToStart < plans.count, nextToStart <= currentIdx + 1 else { return -1 }
+        let idx = nextToStart
+        nextToStart += 1
+        return idx
+    }
+
+    private func launchSegment(_ idx: Int, requestGen: UInt64) {
+        let plan: SegPlan = {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            return plans[idx]
+        }()
+        var sr: Int32 = 24000
+        let st = mtts_stream_start(plan.engine, plan.voice, plan.text,
+                                   plan.rate, plan.pitch, &sr)
+        if st == nil {
+            NSLog("[MagicTTS] 第 \(idx) 段启动失败 (engine=\(plan.engine) voice=\(plan.voice ?? "-"))")
+        }
+        stateLock.lock()
+        if gen == requestGen {
+            streams[idx] = st
+            rates[idx] = sr
+            started[idx] = true
+        } else if let st {
+            // 启动期间请求被顶替: 该流不属于当前代际, 立即退役
+            mtts_stream_cancel(st)
+            retired.append(st)
+        }
+        stateLock.unlock()
+    }
+
+    /// 启动线程: 保持 nextToStart ≤ currentIdx+1; 空闲/取消即退出,
+    /// 渲染推进或新请求会再次调度 (重复调度无碍 — 取段在锁内原子).
+    private func scheduleStarter() {
+        starterQueue.async { [weak self] in
+            guard let self else { return }
+            while true {
+                self.stateLock.lock()
+                let g = self.gen
+                let cancelled = self.cancelled
+                let idle = self.nextToStart >= self.plans.count
+                    || self.nextToStart > self.currentIdx + 1
+                self.stateLock.unlock()
+                if cancelled || idle { return }
+                let idx = self.popLaunchIndex()
+                if idx < 0 {
+                    usleep(10_000)   // 无段可启 (被并发启动线程抢走) → 稍后再看
+                    continue
+                }
+                self.launchSegment(idx, requestGen: g)
+            }
+        }
+    }
+
+    // MARK: - 渲染 (流式: 段队列逐段拉取 + 线性重采样, 末段尽置 Complete)
 
     private func makeRenderBlock() -> AUInternalRenderBlock {
         { [weak self] actionFlags, _, frameCount, _, audioBufferList, _, _ in
@@ -246,27 +377,27 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
             self.stateLock.lock()
             let retiredNow = self.retired
             self.retired = []
-            var st = self.stream
+            let g = self.gen
             var isCancelled = self.cancelled
             var isPending = self.pending
-            let g = self.gen
-            let sr = self.streamRate
+            var firstStarted = self.started.first ?? true
+            let dump = self.dumpAudio
             self.stateLock.unlock()
             for s in retiredNow { mtts_stream_free(s) }
 
-            /* 请求在途而流未就绪 → 有界等待 (stream_start 毫秒级, 首次含 .vl/会话建立) */
+            /* 请求在途而第 0 段未启动 → 有界等待 (stream_start 毫秒级, MS 会话含复位拍) */
             var waitedMs = 0
-            while !isCancelled && st == nil && isPending && waitedMs < 15_000 {
+            while !isCancelled && isPending && !firstStarted && waitedMs < 15_000 {
                 usleep(20_000)
                 waitedMs += 20
                 self.stateLock.lock()
-                st = self.stream
                 isCancelled = self.cancelled
                 isPending = self.pending
+                firstStarted = self.started.first ?? true
                 self.stateLock.unlock()
             }
 
-            guard !isCancelled, let st else {
+            guard !isCancelled else {
                 for i in 0..<Int(frameCount) { out[i] = 0 }
                 actionFlags.pointee.insert(.offlineUnitRenderAction_Complete)
                 return noErr
@@ -277,28 +408,78 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
                 self.curGen = g
                 self.srcBuf.removeAll(keepingCapacity: true)
                 self.srcPos = 0
-                self.curRate = Double(sr)
+                self.curRate = 24000
+                self.dumpActive = dump
                 self.dbg.removeAll(keepingCapacity: true)
-                self.dbgRate = Int(sr)
             }
 
-            let step = self.curRate / self.outputBus.format.sampleRate
+            var step = self.curRate / self.outputBus.format.sampleRate
             let needed = Int(ceil(Double(frameCount) * step)) + 2
 
-            // 拉取源样本 (阻塞至有数据/流结束; MS 首块 ~0.8s)
+            // 拉取源样本: 当前段读尽 → 退役 → 切下一段 (阻塞至有数据/段结束)
             var scratch = [Int16](repeating: 0, count: max(needed, 1))
             var total = 0
-            var streamDone = false
+            var allDone = false
+            var segWaitMs = 0
             while total < needed {
+                self.stateLock.lock()
+                let idx = self.currentIdx
+                let planCount = self.plans.count
+                let st = idx < self.streams.count ? self.streams[idx] : nil
+                let attempted = idx < self.started.count ? self.started[idx] : true
+                let gain = idx < self.plans.count ? self.plans[idx].gain : 1
+                let nextRate = self.rates.indices.contains(idx) ? self.rates[idx] : 24000
+                self.stateLock.unlock()
+
+                if idx >= planCount { allDone = true; break }
+                if nextRate > 0 && Double(nextRate) != self.curRate {
+                    self.curRate = Double(nextRate)   // 段切换: 重采样率随段换
+                    step = self.curRate / self.outputBus.format.sampleRate
+                }
+                if st == nil {
+                    if !attempted {
+                        // 段尚未启动: 促发启动线程并等待 (兜底防启动线程早退死等)
+                        self.scheduleStarter()
+                        usleep(50_000)
+                        segWaitMs += 50
+                        if segWaitMs > 10_000 {   // 启动超时 → 按失败跳段
+                            self.stateLock.lock()
+                            self.currentIdx += 1
+                            self.stateLock.unlock()
+                        }
+                        continue
+                    }
+                    // 启动失败 → 跳段
+                    self.stateLock.lock()
+                    self.currentIdx += 1
+                    self.stateLock.unlock()
+                    continue
+                }
+
                 var done: Int32 = 0
-                let got = mtts_stream_read(st, &scratch[total], Int32(needed - total), &done)
-                total += Int(got)
-                if done != 0 || got == 0 { streamDone = true; break }
-            }
-            if total > 0 {
-                self.srcBuf.reserveCapacity(self.srcBuf.count + total)
-                for i in 0..<total { self.srcBuf.append(Float(scratch[i]) / 32768.0) }
-                self.dbg.append(contentsOf: self.srcBuf.suffix(total))
+                let got = mtts_stream_read(st!, &scratch[total], Int32(needed - total), &done)
+                if got > 0 {
+                    let base = total
+                    self.srcBuf.reserveCapacity(self.srcBuf.count + Int(got))
+                    for i in 0..<Int(got) {
+                        self.srcBuf.append(Float(scratch[base + i]) / 32768.0 * gain)
+                    }
+                    total += Int(got)
+                    if self.dumpActive {
+                        self.dbg.append(contentsOf: self.srcBuf.suffix(Int(got)))
+                    }
+                }
+                if done != 0 || got == 0 {
+                    // 段读尽: 退役 (若未被新请求顶替) 并推进
+                    self.stateLock.lock()
+                    if idx < self.streams.count && self.streams[idx] == st {
+                        self.retired.append(st!)
+                        self.streams[idx] = nil
+                        self.currentIdx = idx + 1
+                    }
+                    self.stateLock.unlock()
+                    self.scheduleStarter()   // 渲染推进 → 促发下一段启动
+                }
             }
 
             // 线性重采样输出
@@ -310,7 +491,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
                     out[i] = self.srcBuf[i0] * (1 - frac) + self.srcBuf[i0 + 1] * frac
                 } else {
                     out[i] = 0
-                    if streamDone { hitEnd = true }
+                    if allDone { hitEnd = true }
                 }
                 self.srcPos += step
             }
@@ -324,13 +505,16 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
 
             if hitEnd {
                 actionFlags.pointee.insert(.offlineUnitRenderAction_Complete)
-                self.writeDebugWav(self.dbg, self.dbgRate)
+                if self.dumpActive {
+                    self.writeDebugWav(self.dbg, self.dbgRate)
+                }
             }
             return noErr
         }
     }
 
-    /// 调试转储: 渲染结束时把引擎侧输出写为 <组容器>/Engines/.debug/last_<n>.wav (轮转 8 个).
+    /// 调试转储 (默认关闭; 触碰 <容器>/Engines/.debug/dump 开启):
+    /// 渲染结束时把引擎侧输出写为 .debug/last_<n>.wav (轮转 8 个).
     private func writeDebugWav(_ pcm: [Float], _ sr: Int) {
         guard pcm.count > 0 else { return }
         let dir = MagicPaths.enginesRoot.appendingPathComponent(".debug", isDirectory: true)

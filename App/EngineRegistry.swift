@@ -129,6 +129,64 @@ enum EngineRegistry {
         }
     }
 
+    /// 方案试听样例: 覆盖中文、英文短语、混夹缩写、孤立字母、数字。
+    static let schemePreviewText = "方案试听：中文与 English mixed reading，NVDA 发布会 at 3 点，字母 Z 分组，圆周率 3.14。"
+
+    /// 方案试听: 与 appex 渲染同一条分发链 (切段 → 逐段桥合成 → 重采样 24k 拼接,
+    /// 各段带方案音量增益) → AVAudioPlayer 播放。
+    static func previewScheme(_ scheme: Scheme) {
+        let segs = TextSegmenter.segment(schemePreviewText, options: scheme.rules)
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = mtts_global_scan(MagicPaths.enginesRoot.path)
+            let outRate: Double = 24000
+            var pcm: [Float] = []
+            for seg in segs {
+                let isPrimary = seg.target == .primary
+                let side = isPrimary ? scheme.primary : scheme.secondary
+                let (engine, voice) = SchemeStore.resolve(side)
+                var sr: Int32 = 24000
+                guard let st = mtts_stream_start(engine, voice, seg.text,
+                                                 Int32(side.rate), Int32(side.pitch), &sr) else {
+                    NSLog("[MagicTTS] 方案试听: 第 %d 段合成失败 (%@)", pcm.count, engine)
+                    continue
+                }
+                defer { mtts_stream_free(st) }
+                var segSamples: [Int16] = []
+                let chunk = 4096
+                var buf = [Int16](repeating: 0, count: chunk)
+                while segSamples.count < 48000 * 30 {
+                    var done: Int32 = 0
+                    let got = mtts_stream_read(st, &buf, Int32(chunk), &done)
+                    if got > 0 { segSamples.append(contentsOf: buf[0..<Int(got)]) }
+                    if done != 0 { break }
+                }
+                guard !segSamples.isEmpty else { continue }
+                // 重采样到 24k + 增益
+                let stepIn = Double(sr) / outRate
+                let outCount = Int(Double(segSamples.count) / stepIn)
+                let gain = Float(side.volume) / 100.0
+                for i in 0..<outCount {
+                    let p = Double(i) * stepIn
+                    let i0 = Int(p)
+                    let frac = Float(p - Double(i0))
+                    let a = i0 < segSamples.count ? Float(segSamples[i0]) : 0
+                    let b = i0 + 1 < segSamples.count ? Float(segSamples[i0 + 1]) : a
+                    pcm.append((a + (b - a) * frac) / 32768.0 * gain)
+                }
+            }
+            guard pcm.count > 0 else { return }
+            var pcm16 = pcm.map { Int16(max(-32768, min(32767, Int($0 * 32767)))) }
+            do {
+                let player = try AVAudioPlayer(contentsOf: PreviewHolder.writeWav(pcm16, rate: 24000))
+                player.volume = 1.0
+                player.play()
+                PreviewHolder.retain(player)
+            } catch {
+                NSLog("[MagicTTS] 方案试听播放失败: %@", error.localizedDescription)
+            }
+        }
+    }
+
     private enum PreviewHolder {
         nonisolated(unsafe) static var alive: [AVAudioPlayer] = []
         static func retain(_ p: AVAudioPlayer) { alive.append(p); trim() }
