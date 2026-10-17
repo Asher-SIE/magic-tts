@@ -1,7 +1,7 @@
 /* Microsoft 嵌入式语音适配器 (naturalvoice + onecore 共用).
  *
  * 对应 Windows 版 (原版 Windows 实现) 与 Android 版
- * (restored/MsEmbeddedEngines.java) 的 EmbeddedSpeechConfig.fromPath 模式.
+ * (resources/reference/restored/MsEmbeddedEngines.java) 的 EmbeddedSpeechConfig.fromPath 模式.
  *
  * ★ 2026-10-17 实测打通的关键事实 (详见文件底部注释):
  *   1. SPX*HANDLE 为指针尺寸 (按 32 位截断会 SIGBUS);

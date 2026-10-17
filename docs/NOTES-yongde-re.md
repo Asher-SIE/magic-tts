@@ -41,7 +41,7 @@ u32  reserved
   - **判型规则是结构性的**（max_offset==4 ⇔ 轻声型），无需听审即可判定
 - 大多数组录满全四声（即使无声调字，如 zuan2/zun2）→ 词典声调指纹不可用，
   定名必须靠顺序插值 + 人耳抽查
-- **已锚定 21 组**（scripts/yongde-groups.json 的 anchors）：a=1, A=8, an=49, ang=289,
+- **已锚定 21 组**（docs/yongde-groups.json 的 anchors）：a=1, A=8, an=49, ang=289,
   ao=353, ai=369, B=424, beng=497, bei=688, cu=1153, deng=1329, dong=1409, e=1729,
   gu=2816, ji=3872, lang=4864, ruan=7281, zhan=8369, xue=9585, zuan=10609, zun=10801
   （另 ba=416, de=1311, duo=1471, duan=1456, dia≈1505, nie≈5715 待位精确化）
@@ -50,7 +50,7 @@ u32  reserved
 - 5 个语音库槽布局完全一致 → 映射表全库通用
 - 组间顺序近字母序但有例外（ai 在 ao 后、zh 在 x 前）；锚点段间距规整
   （多处恰 49 组/段，暗示底层是固定网格编码）
-- 组表产物：scripts/yongde-groups.json（449 组: base/kind/members）
+- 组表产物：docs/yongde-groups.json（449 组: base/kind/members）
 
 ## 4. 编码公式（2026-10-17 深夜，✅✅ 二进制级定案 — 无需再听审）
 
@@ -112,7 +112,7 @@ fiao/cei/din/bong/wong/nun/零声母eng，共 31 字 0.1%）→ 近似音节替�
 
 ## 5. 工具与产物
 
-- 组表+锚点: scripts/yongde-groups.json（449 组, 判型/锚点/成员偏移）
+- 组表+锚点: docs/yongde-groups.json（449 组, 判型/锚点/成员偏移）
 - 听审样本: /tmp/yongde_verify/（65 个, 命名 run槽tone）
 - RE 工具: radare2（brew）；反汇编片段 /tmp/synth.asm
 - 关键反汇编: VoiceLibrary::load @0x15474、synthesize @0x158a0（libyongde_tts.so）
