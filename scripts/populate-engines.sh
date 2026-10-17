@@ -1,15 +1,16 @@
 #!/bin/bash
-# 安装引擎数据到 Magic TTS 的 App Group 容器.
+# 安装引擎数据到 Magic TTS 的 appex 沙盒容器.
 # 用法: ./populate-engines.sh [MS引擎数据源目录] [目标Engines目录]
 #   yongde       ← 项目内 resources/yongde (自包含, 无需外部素材)
 #   naturalvoice/onecore ← MS引擎数据源 (默认旧版组容器一次性迁移;
 #                          从零重建用 fetch-ms-sdk.sh + fetch-voice-models.sh)
-#   目标默认: ~/Library/Group Containers/com.magictts.shared/Engines
+#   目标默认: ~/Library/Containers/com.magictts.voices.synth/Data/Engines
+#   (appex 自有容器: 每句合成的引擎读取不触发 TCC 弹框, 见 Shared/MagicPaths.swift)
 set -euo pipefail
 
 PROJ="$(cd "$(dirname "$0")/.." && pwd)"
 SRC_MS="${1:-$HOME/Library/Group Containers/com.sgr.grtts.shared/Engines}"
-DST="${2:-$HOME/Library/Group Containers/com.magictts.shared/Engines}"
+DST="${2:-$HOME/Library/Containers/com.magictts.voices.synth/Data/Engines}"
 
 mkdir -p "$DST"
 

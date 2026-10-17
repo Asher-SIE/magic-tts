@@ -36,8 +36,13 @@ typedef struct {
     int   native_sample_rate;  /* 引擎原生采样率 */
 } mtts_engine_desc;
 
-/* 初始化: 扫描 engines_root (Engines 目录), 加载各引擎.
- * 返回成功加载的引擎数. */
+/* 轻量扫描: 只读文件系统, 枚举引擎与发音人 (不加载任何引擎库, 毫秒级).
+ * 系统查询 speechVoices 时必须秒回 — 先 scan 后异步 init.
+ * 返回物料就绪的引擎数. */
+int mtts_global_scan(const char *engines_root);
+
+/* 重量初始化: dlopen 引擎库 + 加载数据 (秒级, 可后台预热).
+ * 之前未 scan 过则先 scan. 返回成功加载的引擎数. */
 int mtts_global_init(const char *engines_root);
 
 int  mtts_engine_count(void);
@@ -47,18 +52,34 @@ const mtts_engine_desc *mtts_engine_find(const char *key);
 /* 引擎是否就绪 (库与数据均可用). */
 int mtts_engine_loaded(const char *key);
 
-/* 合成一段文本.
- * rate: 0..500, 100=常速; pitch: 0..100, 50=常音高.
- * 出参 *out_pcm 为 int16 PCM (调用方 mtts_free 释放), *out_sample_rate 为其采样率. */
-mtts_status mtts_synthesize(const char *engine_key, const char *text,
-                            int rate, int pitch,
-                            int16_t **out_pcm, int32_t *out_samples,
-                            int32_t *out_sample_rate);
+/* ---- 发音人 (一个引擎内的多个可选语音) ----
+ * 永德: voices/ 下每个 .vl 文件一个发音人;
+ * MS: model/ 下每个含 SynthModel.license 的包一个发音人.
+ * 描述在 mtts_global_scan 后即有效 (存活到进程结束). */
+typedef struct {
+    const char *key;        /* 选择键: "ydvoice01" / 包目录名; 传 "" = 默认 */
+    const char *name;       /* 显示名: "永德·语音1" / "自然语音·晓晓" */
+    const char *identifier; /* 系统语音 id: com.magictts.<engine>.<key> */
+} mtts_voice_desc;
 
-/* 停止当前合成 (停止代际聚合). */
-void mtts_cancel(const char *engine_key);
+int mtts_voice_count(const char *engine_key);
+const mtts_voice_desc *mtts_voice_at(const char *engine_key, int index);
 
-void mtts_free(void *p);
+/* ---- 流式合成 (渲染线程拉取) ----
+ * start 立即返回 (MS 引擎毫秒级启动, 首块音频 ~0.7s 到达);
+ * read 阻塞至有数据/流结束 (单次调用内部有界等待), 返回样本数,
+ * *done=1 表示流已结束且数据读尽; cancel 可随时终止; free 释放. */
+typedef struct mtts_stream mtts_stream;
+
+mtts_stream *mtts_stream_start(const char *engine_key, const char *voice_key,
+                               const char *text, int rate, int pitch,
+                               int32_t *out_sample_rate);   /* 失败返回 NULL */
+
+int32_t mtts_stream_read(mtts_stream *s, int16_t *buf, int32_t want_samples,
+                         int *done);
+
+void mtts_stream_cancel(mtts_stream *s);
+void mtts_stream_free(mtts_stream *s);
 
 #ifdef __cplusplus
 }

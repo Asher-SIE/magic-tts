@@ -67,9 +67,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1</string>
+	<string>0.2</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>NSHighResolutionCapable</key>
@@ -81,9 +81,16 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 
 # —— 签名 (appex 先签, 再签 App 整体; 均带沙盒+AppGroup entitlements) ——
-codesign --force --sign - --timestamp=none \
+# 优先用钥匙串里的真实证书 (TCC 权限授权可被系统记住, 免每次弹框);
+# 无证书时退回 ad-hoc (TCC 每次访问组容器都可能重新询问).
+SIGN_ID="MagicToolbox Dev"
+if ! security find-identity -v -p codesigning | grep -q "$SIGN_ID"; then
+    SIGN_ID="-"
+fi
+echo "签名身份: $SIGN_ID"
+codesign --force --sign "$SIGN_ID" --timestamp=none \
     --entitlements Entitlements/MagicTTSSynth.entitlements "$APPEX"
-codesign --force --sign - --timestamp=none \
+codesign --force --sign "$SIGN_ID" --timestamp=none \
     --entitlements Entitlements/MagicTTS.entitlements "$APP"
 
 echo

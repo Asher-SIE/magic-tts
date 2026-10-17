@@ -20,6 +20,7 @@
  * 一期: 直接拼接 + 标点停顿; rate/pitch 暂不映射 (Sonic 变速二期). */
 #include "adapters.h"
 
+#include <dirent.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -129,12 +130,62 @@ typedef struct {
     const uint32_t *idx;      /* 2*nslots: {offset, length(字节)} */
 } vl_file;
 
+/* 发音人条目: voices/ 下每个 .vl 一个 (原版 scanVoices 即扫描 ydvoice%d) */
+typedef struct {
+    char file[64];     /* "ydvoice01.vl" */
+    char key[48];      /* "ydvoice01" (去扩展名, 作选择键) */
+    char name[48];     /* "永德·语音1" */
+} yd_voice;
+
+#define YD_MAX_VOICES 16
+
+/* 内存流: 整段合成后顺序供样 (永德合成毫秒级, 无需真流式) */
+typedef struct {
+    int16_t *pcm;
+    int32_t n;
+    int32_t pos;
+    int canceled;
+} yd_stream;
+
 typedef struct {
     vl_file vl;
+    char vdir[1024];           /* voices 目录绝对路径 */
+    char vl_file[64];          /* 当前加载的 .vl 文件名 */
+    yd_voice voices[YD_MAX_VOICES];
+    int nvoices;
     cnode *chars[CH_BUCKETS];
     pnode *phrs[PH_BUCKETS];
     pthread_mutex_t lock;
 } yd_ctx;
+
+/* voices 目录 → 发音人表 (按文件名序; create 与 scan_voices 共用, 纯文件系统) */
+static int yd_scan_dir(const char *vdir, yd_voice *out, int max) {
+    DIR *d = opendir(vdir);
+    if (!d) return 0;
+    struct dirent *e;
+    int n = 0;
+    while ((e = readdir(d)) != NULL && n < max) {
+        size_t len = strlen(e->d_name);
+        if (len < 4 || len >= sizeof(out[0].file) || strcmp(e->d_name + len - 3, ".vl") != 0)
+            continue;
+        snprintf(out[n].file, sizeof(out[n].file), "%s", e->d_name);
+        snprintf(out[n].key, sizeof(out[n].key), "%.*s", (int)(len - 3), e->d_name);
+        /* 显示名: 文件名里的编号 (ydvoice03 → 永德·语音3), 无数字则用序号 */
+        int num = -1;
+        for (const char *p = e->d_name; *p; p++)
+            if (*p >= '0' && *p <= '9') { num = (int)strtol(p, NULL, 10); break; }
+        snprintf(out[n].name, sizeof(out[n].name), "永德·语音%d", num >= 0 ? num : n);
+        n++;
+    }
+    closedir(d);
+    for (int i = 1; i < n; i++) {          /* 文件名排序 (个位数级) */
+        yd_voice t = out[i];
+        int j = i - 1;
+        while (j >= 0 && strcmp(out[j].file, t.file) > 0) { out[j + 1] = out[j]; j--; }
+        out[j + 1] = t;
+    }
+    return n;
+}
 
 static uint8_t *read_all(const char *path, size_t *out_size) {
     FILE *f = fopen(path, "rb");
@@ -348,23 +399,10 @@ static uint32_t utf8_next(const char **p) {
     return cp;
 }
 
-static mtts_status yd_synthesize(void *session, const char *text,
-                                  int rate, int pitch,
-                                  int16_t **out_pcm, int32_t *out_samples,
-                                  int32_t *out_sample_rate,
-                                  const volatile unsigned *stop_gen, unsigned my_gen) {
-    yd_ctx *c = (yd_ctx *)session;
-    if (!c || !c->vl.data) return MTTS_ERR_INIT;
-    (void)rate; (void)pitch;
-
-    pthread_mutex_lock(&c->lock);
-    pcmbuf out = {0};
+/* 文本 → PCM (锁内执行; 发音人须已加载). 返回 0 成功, out 交由调用方接管. */
+static int yd_walk_locked(yd_ctx *c, const char *text, pcmbuf *out) {
     const char *p = text;
     while (*p) {
-        if (stop_gen && *stop_gen != my_gen) {
-            free(out.p); pthread_mutex_unlock(&c->lock);
-            return MTTS_ERR_SYNTH;
-        }
         /* 词组最长匹配 (最多 8 字) */
         if ((unsigned char)*p >= 0xE0) {
             const char *ends[9]; int nch = 0;
@@ -380,7 +418,7 @@ static mtts_status yd_synthesize(void *session, const char *text,
             for (int k = nch; k >= 2 && !hit; k--) {
                 int blen = (int)(ends[k] - p);
                 const char *val = phrase_lookup(c, p, blen);
-                if (val) { emit_pinyin_string(c, &out, val); p = ends[k]; hit = 1; }
+                if (val) { emit_pinyin_string(c, out, val); p = ends[k]; hit = 1; }
             }
             if (hit) continue;
         }
@@ -388,7 +426,7 @@ static mtts_status yd_synthesize(void *session, const char *text,
         if (cp >= 0x4E00 && cp <= 0x9FFF || cp >= 0x3400 && cp <= 0x4DBF ||
             cp == 0x3007 || cp >= 0x20000) {
             const char *py = char_lookup(c, cp);
-            if (py) emit_syllable(c, &out, py);
+            if (py) emit_syllable(c, out, py);
             continue;
         }
         if (cp >= 'A' && cp <= 'Z' || cp >= 'a' && cp <= 'z' ||
@@ -397,64 +435,97 @@ static mtts_status yd_synthesize(void *session, const char *text,
                    : (cp >= 0xFF41) ? (int)cp - 0xFF20
                    : (cp >= 0xFF21) ? (int)cp - 0xFF00 : (int)cp;
             const int16_t *pcm; size_t n;
-            if (vl_entry(c, LETTER_SLOT(up), &pcm, &n)) pcm_append(&out, pcm, n);
+            if (vl_entry(c, LETTER_SLOT(up), &pcm, &n)) pcm_append(out, pcm, n);
             continue;
         }
         if (cp >= '0' && cp <= '9' || cp >= 0xFF10 && cp <= 0xFF19) {
             int d = (cp >= 0xFF10) ? (int)cp - 0xFF10 : (int)cp - '0';
-            emit_syllable(c, &out, kDigits[d]);
+            emit_syllable(c, out, kDigits[d]);
             continue;
         }
         switch (cp) {
             case 0x3002: case '!': case 0xFF01: case '?': case 0xFF1F: case 0x2026:
-                emit_silence(c, &out, 2); break;                 /* 。!?… */
+                emit_silence(c, out, 2); break;                 /* 。!?… */
             case ',': case 0xFF0C: case 0x3001: case ';': case 0xFF1B:
             case ':': case 0xFF1A: case 0x201C: case 0x201D:
             case 0xFF08: case 0xFF09: case 0x300A: case 0x300B: case 0x2014:
-                emit_silence(c, &out, 1); break;                 /* ，、；:“”()《》— */
+                emit_silence(c, out, 1); break;                 /* ，、；:“”()《》— */
             default: break;                                       /* 其余跳过 */
         }
     }
-    pthread_mutex_unlock(&c->lock);
-
-    if (!out.p || out.len == 0) return MTTS_ERR_SYNTH;
-    *out_pcm = out.p;
-    *out_samples = (int32_t)out.len;
-    *out_sample_rate = 16000;
-    return MTTS_OK;
+    return out->p && out->len > 0 ? 0 : -1;
 }
 
 /* ---------- 生命周期 ---------- */
 static int yd_probe(const char *root, const mtts_engine_desc *desc) {
     char path[1024];
-    snprintf(path, sizeof(path), "%s/%s/voices/ydvoice00.vl", root, desc->key);
+    snprintf(path, sizeof(path), "%s/%s/voices", root, desc->key);
+    yd_voice tmp[2];
+    if (yd_scan_dir(path, tmp, 2) == 0) return 0;
+    snprintf(path, sizeof(path), "%s/%s/pinyin.txt", root, desc->key);
     FILE *f = fopen(path, "rb");
     if (f) fclose(f); else return 0;
-    snprintf(path, sizeof(path), "%s/%s/pinyin.txt", root, desc->key);
-    f = fopen(path, "rb");
-    if (f) fclose(f); else return 0;
     return 1;
+}
+
+/* 轻量发音人扫描 (纯文件系统) */
+static int yd_scan_voices(const char *root, const mtts_engine_desc *desc,
+                          mtts_voice_scan *out, int max) {
+    char vdir[1024];
+    snprintf(vdir, sizeof(vdir), "%s/%s/voices", root, desc->key);
+    yd_voice tmp[YD_MAX_VOICES];
+    int n = yd_scan_dir(vdir, tmp, YD_MAX_VOICES);
+    if (n > max) n = max;
+    for (int i = 0; i < n; i++) {
+        snprintf(out[i].key, sizeof(out[i].key), "%s", tmp[i].key);
+        snprintf(out[i].name, sizeof(out[i].name), "%s", tmp[i].name);
+    }
+    return n;
+}
+
+/* 加载指定 .vl 到 c->vl (调用方持锁) */
+static int yd_load_vl(yd_ctx *c, const char *path) {
+    size_t sz = 0;
+    uint8_t *data = read_all(path, &sz);
+    if (!data || sz < 24 + 8 * 24576) {
+        fprintf(stderr, "[MagicTTS][yongde] .vl 缺失或过小: %s\n", path);
+        free(data);
+        return -1;
+    }
+    uint32_t hdr[6];
+    memcpy(hdr, data, 24);
+    if (hdr[0] != 24576 || hdr[2] != 16000) {
+        fprintf(stderr, "[MagicTTS][yongde] .vl 头异常 (slots=%u sr=%u): %s\n",
+                hdr[0], hdr[2], path);
+        free(data);
+        return -1;
+    }
+    free(c->vl.data);
+    c->vl.data = data;
+    c->vl.size = sz;
+    c->vl.nslots = hdr[0];
+    c->vl.idx = (const uint32_t *)(c->vl.data + 24);
+    if (c->vdir[0]) {
+        const char *slash = strrchr(path, '/');
+        snprintf(c->vl_file, sizeof(c->vl_file), "%s", slash ? slash + 1 : path);
+    }
+    return 0;
 }
 
 static void *yd_create(const char *root, const mtts_engine_desc *desc) {
     yd_ctx *c = calloc(1, sizeof(yd_ctx));
     char path[1024];
-    size_t sz = 0;
 
-    snprintf(path, sizeof(path), "%s/%s/voices/ydvoice00.vl", root, desc->key);
-    c->vl.data = read_all(path, &sz);
-    c->vl.size = sz;
-    if (!c->vl.data || c->vl.size < 24 + 8 * 24576) {
-        fprintf(stderr, "[MagicTTS][yongde] .vl 缺失或过小: %s\n", path);
-        free(c->vl.data); free(c);
+    snprintf(c->vdir, sizeof(c->vdir), "%s/%s/voices", root, desc->key);
+    c->nvoices = yd_scan_dir(c->vdir, c->voices, YD_MAX_VOICES);
+    if (c->nvoices == 0) {
+        fprintf(stderr, "[MagicTTS][yongde] voices/ 下没有 .vl\n");
+        free(c);
         return NULL;
     }
-    uint32_t hdr[6];
-    memcpy(hdr, c->vl.data, 24);
-    c->vl.nslots = hdr[0];
-    c->vl.idx = (const uint32_t *)(c->vl.data + 24);
-    if (hdr[2] != 16000) {
-        fprintf(stderr, "[MagicTTS][yongde] 采样率异常 %u\n", hdr[2]);
+
+    snprintf(path, sizeof(path), "%s/%s", c->vdir, c->voices[0].file);
+    if (yd_load_vl(c, path) != 0) {
         free(c->vl.data); free(c);
         return NULL;
     }
@@ -474,12 +545,91 @@ static void *yd_create(const char *root, const mtts_engine_desc *desc) {
     pthread_mutex_init(&c->lock, NULL);
     size_t entries = 0;
     for (uint32_t k = 0; k < c->vl.nslots; k++) if (c->vl.idx[2 * k + 1]) entries++;
-    fprintf(stderr, "[MagicTTS][yongde] 复刻引擎就绪 (slots=%u entries=%zu sr=16000)\n",
-            c->vl.nslots, entries);
+    fprintf(stderr, "[MagicTTS][yongde] 复刻引擎就绪 (%d 发音人, 当前 %s: slots=%u entries=%zu sr=16000)\n",
+            c->nvoices, c->voices[0].file, c->vl.nslots, entries);
     return c;
 }
 
-static void yd_stop(void *session) { (void)session; }
+/* ---------- 发音人枚举 ---------- */
+static int yd_voice_count(void *session) { return ((yd_ctx *)session)->nvoices; }
+static const char *yd_voice_key(void *session, int idx) {
+    yd_ctx *c = session;
+    if (idx < 0 || idx >= c->nvoices) return NULL;
+    return c->voices[idx].key;
+}
+static const char *yd_voice_name(void *session, int idx) {
+    yd_ctx *c = session;
+    if (idx < 0 || idx >= c->nvoices) return NULL;
+    return c->voices[idx].name;
+}
+
+/* ---------- 流式合成 ---------- */
+static void *yd_stream_start(void *session, const char *voice_key, const char *text,
+                             int rate, int pitch, int32_t *out_sample_rate) {
+    yd_ctx *c = session;
+    (void)rate; (void)pitch;
+
+    pthread_mutex_lock(&c->lock);
+
+    /* 切换发音人: 选择键匹配 (ydvoice01 / ydvoice01.vl 均可) */
+    if (voice_key && voice_key[0]) {
+        char want[64];
+        const char *dot = strrchr(voice_key, '.');
+        if (dot && strcmp(dot, ".vl") == 0)
+            snprintf(want, sizeof(want), "%.*s", (int)(dot - voice_key), voice_key);
+        else
+            snprintf(want, sizeof(want), "%s", voice_key);
+        for (int i = 0; i < c->nvoices; i++) {
+            if (strcmp(c->voices[i].key, want) != 0) continue;
+            if (strcmp(c->voices[i].file, c->vl_file) != 0) {
+                char path[1100];
+                snprintf(path, sizeof(path), "%s/%s", c->vdir, c->voices[i].file);
+                if (yd_load_vl(c, path) != 0) {
+                    pthread_mutex_unlock(&c->lock);
+                    return NULL;
+                }
+                fprintf(stderr, "[MagicTTS][yongde] 切换发音人 → %s\n", c->voices[i].file);
+            }
+            break;
+        }
+    }
+
+    pcmbuf out = {0};
+    int rc = yd_walk_locked(c, text, &out);
+    pthread_mutex_unlock(&c->lock);
+    if (rc != 0) return NULL;
+
+    yd_stream *s = malloc(sizeof(*s));
+    s->pcm = out.p;
+    s->n = (int32_t)out.len;
+    s->pos = 0;
+    s->canceled = 0;
+    *out_sample_rate = 16000;
+    return s;
+}
+
+static int32_t yd_stream_read(void *stream, int16_t *buf, int32_t want, int *done) {
+    yd_stream *s = stream;
+    if (!s || s->canceled || s->pos >= s->n) {
+        if (done) *done = 1;
+        return 0;
+    }
+    int32_t n = s->n - s->pos;
+    if (n > want) n = want;
+    memcpy(buf, s->pcm + s->pos, (size_t)n * sizeof(int16_t));
+    s->pos += n;
+    if (done) *done = (s->pos >= s->n) ? 1 : 0;
+    return n;
+}
+
+static void yd_stream_cancel(void *stream) { ((yd_stream *)stream)->canceled = 1; }
+
+static void yd_stream_free(void *stream) {
+    yd_stream *s = stream;
+    if (!s) return;
+    free(s->pcm);
+    free(s);
+}
 
 static void yd_destroy(void *session) {
     yd_ctx *c = (yd_ctx *)session;
@@ -493,5 +643,10 @@ static void yd_destroy(void *session) {
     free(c);
 }
 
-static const mtts_adapter_if kYdAdapter = { yd_probe, yd_create, yd_synthesize, yd_stop, yd_destroy };
+static const mtts_adapter_if kYdAdapter = {
+    yd_probe, yd_scan_voices, yd_create,
+    yd_voice_count, yd_voice_key, yd_voice_name,
+    yd_stream_start, yd_stream_read, yd_stream_cancel, yd_stream_free,
+    yd_destroy,
+};
 const mtts_adapter_if *mtts_yongde_adapter(void) { return &kYdAdapter; }

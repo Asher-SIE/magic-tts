@@ -6,21 +6,36 @@
 
 #include "engine_bridge.h"
 
+/* 发音人轻量扫描结果 (纯文件系统枚举, 不加载引擎库) */
+typedef struct {
+    char key[256];    /* 选择键: "ydvoice01" / MS 包目录名 */
+    char name[128];   /* 显示名 */
+} mtts_voice_scan;
+
 typedef struct mtts_adapter_if {
     /* 探测: Engines/<key>/ 下库与数据是否就绪 (只读检查, 不抛错). */
     int  (*probe)(const char *engines_root, const mtts_engine_desc *desc);
 
+    /* 轻量发音人扫描 (不 dlopen/不加载 .vl, 毫秒级) —
+     * 系统查询 speechVoices 时必须秒回, 故与引擎初始化分离. */
+    int  (*scan_voices)(const char *engines_root, const mtts_engine_desc *desc,
+                        mtts_voice_scan *out, int max);
+
     /* 建会话: 加载引擎 + 初始化. 失败返回 NULL → 引擎未就绪. */
     void *(*create)(const char *engines_root, const mtts_engine_desc *desc);
 
-    /* 合成: 输出 int16 PCM. stop_gen/my_gen 为停止代际. */
-    mtts_status (*synthesize)(void *session, const char *text,
-                              int rate, int pitch,
-                              int16_t **out_pcm, int32_t *out_samples,
-                              int32_t *out_sample_rate,
-                              const volatile unsigned *stop_gen, unsigned my_gen);
+    /* 发音人枚举 (create 成功后有效; 与 scan_voices 结果一致). */
+    int  (*voice_count)(void *session);
+    const char *(*voice_key)(void *session, int idx);   /* idx 越界 → NULL */
+    const char *(*voice_name)(void *session, int idx);
 
-    void (*stop)(void *session);
+    /* 流式合成: start 毫秒级返回; read 阻塞拉取; cancel/free 见 engine_bridge.h.
+     * voice_key 为 NULL/"" 时用引擎默认发音人. */
+    void *(*stream_start)(void *session, const char *voice_key, const char *text,
+                          int rate, int pitch, int32_t *out_sample_rate);
+    int32_t (*stream_read)(void *stream, int16_t *buf, int32_t want, int *done);
+    void (*stream_cancel)(void *stream);
+    void (*stream_free)(void *stream);
 
     void (*destroy)(void *session);
 } mtts_adapter_if;
