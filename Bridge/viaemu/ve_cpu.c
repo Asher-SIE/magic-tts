@@ -376,6 +376,31 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
             break;
         }
 
+        case 0x04: case 0x05: case 0x0C: case 0x0D:
+        case 0x14: case 0x15: case 0x1C: case 0x1D:
+        case 0x24: case 0x25: case 0x2C: case 0x2D:
+        case 0x34: case 0x35: case 0x3C: case 0x3D: {   /* ALU al/eax, imm */
+            int aluop = (op >> 3) & 7;
+            int wide = op & 1;
+            uint32_t b = wide ? fetch32(c) : fetch8(c);
+            uint32_t a = wide ? c->reg[EAX] : (c->reg[EAX] & 0xFF), r = 0;
+            switch (aluop) {
+            case 0: r = a + b; add_flags(c, a, b, r); break;
+            case 1: r = a | b; logic_flags(c, r); break;
+            case 2: r = a + b + (c->flags & CF); add_flags(c, a + (c->flags & CF), b, r); break;
+            case 3: r = a - b - (c->flags & CF); sub_flags(c, a - (c->flags & CF), b, r); break;
+            case 4: r = a & b; logic_flags(c, r); break;
+            case 5: r = a - b; sub_flags(c, a, b, r); break;
+            case 6: r = a ^ b; logic_flags(c, r); break;
+            case 7: sub_flags(c, a, b, a - b); break;
+            }
+            if (aluop != 7) {
+                if (wide) c->reg[EAX] = r;
+                else c->reg[EAX] = (c->reg[EAX] & 0xFFFFFF00u) | (r & 0xFF);
+            }
+            break;
+        }
+
         case 0x06: push32(c, 0x10); break;             /* push es */
         case 0x07: (void)pop32(c); break;              /* pop es */
         case 0x0E: push32(c, 0x33); break;             /* push cs 值无意义 */

@@ -89,3 +89,19 @@ ibmeci DllMain 深入 CRT/注册表初始化后, 尾跳 memcpy 收到 n=垃圾 �
 - 模块基址跳转捕获器已内置 (rc=5, 打印 [esp]) — 每次栈错位直接定位
 - DllMain 全绿后: eciNewEx→AddText→SetOutputBuffer→Synthesize→回调 PCM→WAV 验证
 - 之后接 Bridge 适配器 (engine table "viavoice", 同 yongde 形态) + Engines/viavoice/ 安装
+
+## 六、第二轮进展 (同日晚, 续)
+
+- **memset 垫片参数序 bug** (val/n 串位 → 604MB 屠场, 0x80808080 污染源) — 已修
+- **ALU 立即数操作码组补齐** (04/05...3C/3D: cmp eax,imm 等 16 个)
+- **operator new (??2@YAPAXI@Z) 垫片**
+- **GetMessageA 真语义**: 无消息阻塞而非返回 WM_QUIT (曾杀死引擎窗口线程→事件永不触发);
+  PostMessage/GetMessage 跨线程队列打通
+- **ECIINI 伪注册表**: 数据表直接从 libq4 的 eciini_vals 符号 dump 而来 (子键 "6.0":
+  Path/Path_Rom/Path_Cmm/Path_Cat + Version/Concatenative/CallbackFlag + Voice1..8;
+  "LanguageIndependent": Path_Cmm/Path_Cat); 路径 {D} 展开为引擎目录
+- **fopen/CreateFileA 虚拟路径**: 剥 "C:\...\" 前缀取文件名映射引擎目录
+- eciNewEx 已能跑进引擎初始化 (堆分配/线程/注册表读取全部活跃)
+- **当前卡点**: 引擎内部经 wrapper 调 RegOpenKeyExA 时 phkResult 已是垃圾 (0x56) —
+  上游某处仍有一处栈漂移; 定位法: VE_TRACE 该 wrapper (0x10020ae0) 的调用者,
+  检查其入参来源 (其 phkResult 应为栈上 leal 地址, 却是 0x56)

@@ -487,23 +487,80 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
         if (!strcmp(fn, "GetStringTypeA") || !strcmp(fn, "GetStringTypeW")) { STD(20); c->reg[0] = 0; goto done; }
     }
     else if (strcasecmp(dll, "ADVAPI32.dll") == 0) {
-        if (!strcmp(fn, "RegOpenKeyExA") || !strcmp(fn, "RegCreateKeyExA")) {
-            int h = h_alloc(H_KEY);
-            /* RegOpenKeyExA(hkey,subkey,options,sam,phkResult=5参) / RegCreateKeyExA(...,phkResult=第7参) */
-            uint32_t outp = !strcmp(fn, "RegOpenKeyExA") ? A(4) : A(6);
-            if (outp) *(uint32_t *)ve_guest_ptr(outp) = (uint32_t)h;
-            STD(!strcmp(fn, "RegOpenKeyExA") ? 20 : 32);
-            c->reg[0] = 0;
-            goto done;
+        /* ---- ViaVoice ECIINI 伪注册表 (数据源自 libq4 内嵌表 eciini_vals) ---- */
+        static const struct { const char *sub, *name, *val; } k_ini[] = {
+            {"6.0", "Path", "{D}/chs50.syn"},
+            {"6.0", "Path_Rom", "{D}/chsrom.dll"},
+            {"6.0", "Path_Cmm", "{D}/ibmcmm.dll"},
+            {"6.0", "Path_Cat", "{D}/torrent.dll"},
+            {"6.0", "Version", "5.0"},
+            {"6.0", "Concatenative", "1.0"},
+            {"6.0", "CallbackFlag", "0x33f"},
+            {"6.0", "Voice1", "0 50 69 30 0 0 50 92"},
+            {"6.0", "Voice2", "1 50 81 30 0 50 50 100"},
+            {"6.0", "Voice3", "1 22 93 35 0 0 50 90"},
+            {"6.0", "Voice4", "0 86 56 47 0 0 50 93"},
+            {"6.0", "Voice5", "0 50 69 34 0 0 70 92"},
+            {"6.0", "Voice6", "1 56 89 35 0 40 70 95"},
+            {"6.0", "Voice7", "1 45 68 30 3 40 50 90"},
+            {"6.0", "Voice8", "0 30 61 44 18 20 50 90"},
+            {"LanguageIndependent", "Path_Cmm", "{D}/ibmcmm.dll"},
+            {"LanguageIndependent", "Path_Cat", "{D}/torrent.dll"},
+        };
+        /* 句柄编码: 0x100=ECIINI 根, 0x101="6.0", 0x102="LanguageIndependent" */
+        if (!strcmp(fn, "RegOpenKeyExA")) {
+            uint32_t parent = A(0);
+            const char *sub = cp(A(1));
+            uint32_t hk = 0;
+            if (strstr(sub, "ECIINI")) hk = 0x100;
+            else if (parent == 0x100 && !strcmp(sub, "6.0")) hk = 0x101;
+            else if (parent == 0x100 && !strcmp(sub, "LanguageIndependent")) hk = 0x102;
+            if (hk) {
+                if (A(4)) *(uint32_t *)ve_guest_ptr(A(4)) = hk;
+                STD(20); c->reg[0] = 0; goto done;
+            }
+            if (A(4)) *(uint32_t *)ve_guest_ptr(A(4)) = 0x1FF;
+            STD(20); c->reg[0] = 2; goto done;
         }
-        if (!strcmp(fn, "RegCloseKey")) { Handle *h = h_get((int)A(0)); if (h) h->used = 0; STD(4); c->reg[0] = 0; goto done; }
+        if (!strcmp(fn, "RegCreateKeyExA")) {
+            if (A(6)) *(uint32_t *)ve_guest_ptr(A(6)) = 0x1FF;
+            STD(32); c->reg[0] = 0; goto done;
+        }
         if (!strcmp(fn, "RegQueryValueExA")) {
-            uint32_t ptype = A(3), pdata = A(4), plen = A(5);
-            if (ptype) *(uint32_t *)ve_guest_ptr(ptype) = 4;
-            if (plen) *(uint32_t *)ve_guest_ptr(plen) = 4;
-            if (pdata) *(uint32_t *)ve_guest_ptr(pdata) = 0;
-            STD(24); c->reg[0] = 2; goto done;   /* ERROR_FILE_NOT_FOUND → 引擎走默认 */
+            uint32_t hk = A(0);
+            const char *name = cp(A(1));
+            const char *subname = hk == 0x101 ? "6.0" : (hk == 0x102 ? "LanguageIndependent" : NULL);
+            const char *val = NULL;
+            if (subname) {
+                for (unsigned i = 0; i < sizeof(k_ini) / sizeof(k_ini[0]); i++) {
+                    if (!strcmp(k_ini[i].sub, subname) && !strcmp(k_ini[i].name, name)) {
+                        val = k_ini[i].val; break;
+                    }
+                }
+            }
+            if (val) {
+                char expanded[600];
+                extern char g_ve_dir[512];
+                const char *p = val; int j = 0;
+                for (const char *q = strstr(p, "{D}"); q; q = strstr(p, "{D}")) {
+                    while (p < q && j < 550) expanded[j++] = *p++;
+                    for (const char *dd = g_ve_dir; *dd && j < 550; dd++) expanded[j++] = *dd;
+                    p += 3;
+                }
+                while (*p && j < 550) expanded[j++] = *p++;
+                expanded[j] = 0;
+                uint32_t len = (uint32_t)strlen(expanded) + 1;
+                if (A(3)) *(uint32_t *)ve_guest_ptr(A(3)) = 1;   /* REG_SZ */
+                if (A(5)) *(uint32_t *)ve_guest_ptr(A(5)) = len;
+                if (A(4) && A(2) >= len) memcpy(ve_guest_ptr(A(4)), expanded, len);
+                STD(24); c->reg[0] = 0; goto done;
+            }
+            if (A(3)) *(uint32_t *)ve_guest_ptr(A(3)) = 4;
+            if (A(5)) *(uint32_t *)ve_guest_ptr(A(5)) = 4;
+            if (A(4)) *(uint32_t *)ve_guest_ptr(A(4)) = 0;
+            STD(24); c->reg[0] = 2; goto done;
         }
+        if (!strcmp(fn, "RegCloseKey")) { STD(4); c->reg[0] = 0; goto done; }
         if (!strcmp(fn, "RegSetValueExA")) { STD(24); c->reg[0] = 0; goto done; }
         if (!strcmp(fn, "RegQueryInfoKeyA")) { STD(48); c->reg[0] = 0; goto done; }
         if (!strcmp(fn, "RegEnumKeyExA")) { STD(32); c->reg[0] = 259; goto done; }
@@ -535,9 +592,24 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
             STD(16); c->reg[0] = 0; goto done;
         }
         if (!strcmp(fn, "GetMessageA")) {
-            usleep(20000);
-            memset(ve_guest_ptr(A(0)), 0, 28);
-            STD(16); c->reg[0] = 0; goto done;   /* 0 = WM_QUIT */
+            /* 真实语义: 无消息时阻塞 (绝不能返回 0=WM_QUIT, 会杀死引擎窗口线程) */
+            extern int ve_pop_msg(uint32_t *m);
+            int got = 0;
+            for (int waited = 0; waited < 60000 && !got; waited += 20) {
+                uint32_t m;
+                if (ve_pop_msg(&m)) {
+                    memset(ve_guest_ptr(A(0)), 0, 28);
+                    *(uint32_t *)ve_guest_ptr(A(0) + 4) = m;
+                    got = 1;
+                } else usleep(20000);
+            }
+            if (!got) { memset(ve_guest_ptr(A(0)), 0, 28); }   /* WM_NULL 空转 */
+            STD(16); c->reg[0] = 1; goto done;   /* 非 0/‑1 = 有消息 */
+        }
+        if (!strcmp(fn, "PostMessageA")) {
+            extern void ve_post_msg(uint32_t m);
+            ve_post_msg(A(1));
+            STD(16); c->reg[0] = 1; goto done;
         }
         if (!strcmp(fn, "PeekMessageA")) { memset(ve_guest_ptr(A(0)), 0, 28); STD(20); c->reg[0] = 0; goto done; }
         if (!strcmp(fn, "TranslateMessage") || !strcmp(fn, "DispatchMessageA")) { STD(4); c->reg[0] = 0; goto done; }
@@ -558,13 +630,26 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
         if (!strcmp(fn, "timeEndPeriod") || !strcmp(fn, "timeBeginPeriod")) { STD(4); c->reg[0] = 0; goto done; }
     }
     else if (strcasecmp(dll, "MSVCRT.dll") == 0) {
-        if (!strcmp(fn, "memcpy")) { c->reg[0] = A(0); memcpy(ve_guest_ptr(A(0)), ve_guest_ptr(A(1)), A(2)); return 0; }
+        if (!strcmp(fn, "memcpy")) {
+            if (A(2) > 0x40000) ve_log("memcpy 大块: dst=0x%08x src=0x%08x n=0x%x (返回地址 0x%08x)", A(0), A(1), A(2), M32H(c->reg[4] + 0x1000));
+            c->reg[0] = A(0); memcpy(ve_guest_ptr(A(0)), ve_guest_ptr(A(1)), A(2)); return 0;
+        }
         if (!strcmp(fn, "memmove")) { c->reg[0] = A(0); memmove(ve_guest_ptr(A(0)), ve_guest_ptr(A(1)), A(2)); return 0; }
-        if (!strcmp(fn, "memset")) { c->reg[0] = A(0); memset(ve_guest_ptr(A(0)), A(2) & 0xFF, A(3)); return 0; }
+        if (!strcmp(fn, "memset")) {
+            if (A(3) > 0x10000 || ((A(2) & 0xFF) == 0x80 && A(3) > 256)) {
+                ve_log("memset 可疑: [esp-4]=0x%08x [esp]=0x%08x [esp+4]=0x%08x [esp+8]=0x%08x [esp+12]=0x%08x [esp+16]=0x%08x",
+                       M32H(c->reg[4] - 4), M32H(c->reg[4]), M32H(c->reg[4] + 4),
+                       M32H(c->reg[4] + 8), M32H(c->reg[4] + 12), M32H(c->reg[4] + 16));
+                ve_log("  → 解释为 dst=0x%08x val=0x%02x n=0x%x", A(0), A(2) & 0xFF, A(3));
+            }
+            c->reg[0] = A(0); memset(ve_guest_ptr(A(0)), A(1) & 0xFF, A(2)); return 0;
+        }
         if (!strcmp(fn, "malloc")) { c->reg[0] = ve_heap_alloc(A(0)); return 0; }
         if (!strcmp(fn, "calloc")) { uint32_t sz = A(0) * A(1); uint32_t p = ve_heap_alloc(sz); if (p) memset(ve_guest_ptr(p), 0, sz); c->reg[0] = p; return 0; }
         if (!strcmp(fn, "realloc")) { c->reg[0] = ve_heap_realloc(A(0), A(1)); return 0; }
         if (!strcmp(fn, "free")) { ve_heap_free(A(0)); return 0; }
+        if (!strcmp(fn, "??2@YAPAXI@Z")) { c->reg[0] = ve_heap_alloc(A(0)); return 0; }   /* operator new */
+        if (!strcmp(fn, "??3@YAXPAX@Z")) { ve_heap_free(A(0)); return 0; }                /* operator delete */
         if (!strcmp(fn, "strlen")) { c->reg[0] = (uint32_t)strlen(cp(A(0))); return 0; }
         if (!strcmp(fn, "strcpy")) { c->reg[0] = A(0); strcpy(cp(A(0)), cp(A(1))); return 0; }
         if (!strcmp(fn, "strncpy")) { c->reg[0] = A(0); strncpy(cp(A(0)), cp(A(1)), A(2)); return 0; }
@@ -702,8 +787,11 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
             const char *path = cp(A(0)), *mode = cp(A(1));
             char full[1024];
             extern char g_ve_dir[512];
-            if (path[0] != '/') snprintf(full, sizeof(full), "%s/%s", g_ve_dir, path);
-            else snprintf(full, sizeof(full), "%s", path);
+            const char *bs = strrchr(path, 92);   /* backslash */
+            const char *fs2 = strrchr(path, '/');
+            const char *base = bs > fs2 ? bs + 1 : (fs2 ? fs2 + 1 : path);
+            if (path[0] == '/') snprintf(full, sizeof(full), "%s", path);
+            else snprintf(full, sizeof(full), "%s/%s", g_ve_dir, base);
             FILE *fp = fopen(full, mode);
             if (!fp) { c->reg[0] = 0; return 0; }
             int slot = -1;
@@ -795,4 +883,23 @@ void SYSTEMTIME_FILL(void *p) {
     t[0] = (uint16_t)(tm.tm_year + 1900); t[1] = (uint16_t)(tm.tm_mon + 1); t[2] = (uint16_t)tm.tm_wday;
     t[3] = (uint16_t)tm.tm_mday; t[4] = (uint16_t)tm.tm_hour; t[5] = (uint16_t)tm.tm_min;
     t[6] = (uint16_t)tm.tm_sec; t[7] = 0;
+}
+
+/* ---- 简单跨线程消息队列 (PostMessage → GetMessage) ---- */
+static uint32_t g_msgq[16];
+static int g_msgq_n = 0;
+static pthread_mutex_t g_msgq_mu = PTHREAD_MUTEX_INITIALIZER;
+void ve_post_msg(uint32_t m) {
+    pthread_mutex_lock(&g_msgq_mu);
+    if (g_msgq_n < 16) g_msgq[g_msgq_n++] = m;
+    pthread_mutex_unlock(&g_msgq_mu);
+}
+int ve_pop_msg(uint32_t *m) {
+    pthread_mutex_lock(&g_msgq_mu);
+    if (g_msgq_n == 0) { pthread_mutex_unlock(&g_msgq_mu); return 0; }
+    *m = g_msgq[0];
+    g_msgq_n--;
+    memmove(g_msgq, g_msgq + 1, g_msgq_n * 4);
+    pthread_mutex_unlock(&g_msgq_mu);
+    return 1;
 }
