@@ -51,3 +51,41 @@ appex 沙盒不容); i386 Windows DLL 在 Apple Silicon 无 32 位执行路径
 扩 MS 包成本近零; 若要 ViaVoice 经典音色再立项。逆向建议次序:
 ① ibmeci 的 ECI 入口管道 → ② chsrom ROM 表结构 (与 .vl 相似性最高)
 → ③ chs.uil 词典导出 → ④ chs50.syn 前端 (可能可借鉴永德 pinyin/phrases 经验)。
+
+## 五、viaemu 实现进度 (2026-10-17 晚, 进行中)
+
+**架构已定**: `Bridge/viaemu/` 四文件 — ve_memory(guest 区+堆), ve_pe(PE32 加载),
+ve_cpu(i386+x87 全量解释器), ve_win(266 导入垫片+线程/事件/文件句柄), ve_eci(ECI 宿主)。
+macOS arm64 无低 4GB 固定映射 → 恒等映射不可行, 改**加法偏移翻译** (g_ve_off)。
+冒烟 CLI: `clang -IBridge/include -IBridge/viaemu -o /tmp/vvtts_cli
+scripts/test_vvtts_cli.c Bridge/viaemu/*.c -lpthread -framework CoreFoundation`。
+
+**ECI 规范 (来源: davidacm/NVDA-IBMTTS-Driver `_ibmeci.py`)**:
+- eciNewEx(0x00060000)=MandarinChinese(GB); eciSetOutputBuffer **3 参带 handle**;
+- 语速/音高/音量走 eciSetVoiceParam(h,0,param,v): pitchBaseline=2,speed=6,volume=7;
+- eciSampleRate=5 (SetParam), 值 0=8k/1=11025/2=22050; 回调 eciWaveformBuffer msg=**0**,
+  lp=样本数; 32 位 eciVersion(ptr)。
+
+**已修 bug 清单 (每条都有惨痛现场)**:
+1. PE 节表偏移: VirtualSize@8/VirtualAddress@12/RawSize@16/RawPtr@20 (曾全错→映像全零)
+2. ve_call_guest 压栈序: 参数先压、STOP 哨兵最后 (曾哨兵最深→ret 弹到 arg1=模块基址)
+3. 垫片参数宏 A(n)=[esp+4n] (FF/2 已弹返回地址; 曾 +4 错位→一切参数读错一位)
+4. FF/4 尾调用导入: 弹自身返回地址→跑垫片→回到调用者 (曾按 noreturn 弃赛)
+5. FS 段前缀: modrm 加 seg_add + **A0-A3 moffs 寻址同样生效** (fs:[0] 即 A1 形态)
+6. stdcall 垫片弹栈审计 (GetModuleFileNameA/LoadLibrary/GetProcAddress/SearchPath/
+   TlsGetValue/Interlocked×2/RegOpenKeyExA 出参 A(4)…)
+7. MSVCRT 全 cdecl 不弹栈; fopen 族返回 guest 伪 FILE (宿主 FILE* 48位地址进 guest 即炸弹)
+8. Cmm 层 (ibmcmm/torrent) DllMain 跳过 (等跨进程服务, 同进程模式必死锁)
+9. WaitForSingleObject INFINITE 封顶 5s→WAIT_TIMEOUT; 解释器 3e9 指令预算防死循环
+10. 崩溃自诊断: SIGBUS/SIGSEGV handler 打印 eip/esp/seg_fs/栈 (lldb 需管理员授权不可用)
+
+**当前状态**: chs.uil/chsrom DllMain ✅ 通过; chs50.syn rc=5 (跳模块基址=仍有栈错位);
+ibmeci DllMain 深入 CRT/注册表初始化后, 尾跳 memcpy 收到 n=垃圾 → 拷越界 @0x3F800000
+(上游栈被 0x80808080 污染, 污染点待查 — 疑某个垫片写穿或 __chkstk/alloca 类)。
+
+**下轮继续的抓手**:
+- VE_TRACE=1 跑, 找 0x80808080 首次出现的 eip (污染源); 对照 objdump 该函数
+- 剩余嫌疑: 0xC8 enter 实现 (clobbers EBP)/0x62 bound/回调重入 esp/某个 MSVCIRT this 透传
+- 模块基址跳转捕获器已内置 (rc=5, 打印 [esp]) — 每次栈错位直接定位
+- DllMain 全绿后: eciNewEx→AddText→SetOutputBuffer→Synthesize→回调 PCM→WAV 验证
+- 之后接 Bridge 适配器 (engine table "viavoice", 同 yongde 形态) + Engines/viavoice/ 安装
