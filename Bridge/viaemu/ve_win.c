@@ -711,10 +711,9 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
                        A(0), M32H(c->reg[4] - 4), M32H(c->reg[4] + 4), M32H(c->reg[4] + 8));
             }
             c->reg[0] = ve_heap_alloc(A(0));
-            if (g_shims[idx].borp) c->reg[4] += 4;   /* Borland(ibmeci/torrent): 被调方弹参 */
-            return 0;   /* operator new */
+            return 0;   /* operator new (cdecl — 曾误判 Borland 弹参, 0x1001f7c5 add esp,4 铁证撤销) */
         }
-        if (!strcmp(fn, "??3@YAXPAX@Z")) { ve_heap_free(A(0)); if (g_shims[idx].borp) c->reg[4] += 4; return 0; }
+        if (!strcmp(fn, "??3@YAXPAX@Z")) { ve_heap_free(A(0)); return 0; }
         if (!strcmp(fn, "strlen")) { c->reg[0] = (uint32_t)strlen(cp(A(0))); return 0; }
         if (!strcmp(fn, "strcpy")) { c->reg[0] = A(0); strcpy(cp(A(0)), cp(A(1))); return 0; }
         if (!strcmp(fn, "strncpy")) { c->reg[0] = A(0); strncpy(cp(A(0)), cp(A(1)), A(2)); return 0; }

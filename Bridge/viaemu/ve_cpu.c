@@ -749,14 +749,23 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
             SET_RM32(m, r);
             break;
         }
-        case 0xC2: { uint16_t n = fetch16(c); c->eip = pop32(c); c->reg[ESP] += n;
+        case 0xC2: { uint16_t n = fetch16(c); uint32_t ret_eip = c->eip - 3; c->eip = pop32(c); c->reg[ESP] += n;
                      if (c->eip == STOP_EIP) return 0;
-                     if (c->eip >= THUNK_BASE && c->eip < THUNK_END)
-                         ve_log("RET→thunk 0x%08x (push+ret 蹦床?) [esp]=0x%08x", c->eip, M32(c->reg[4]));
+                     if ((c->eip < 0x10000000u || c->eip >= 0x28000000u)
+                         && !(c->eip >= THUNK_BASE && c->eip < THUNK_END)) {
+                         ve_log("C2-RET→非代码区 val=0x%08x ret_at≈0x%08x esp=0x%08x [esp]=0x%08x [esp+4]=0x%08x eax=0x%08x ecx=0x%08x edx=0x%08x",
+                                c->eip, ret_eip, c->reg[4], M32(c->reg[4]), M32(c->reg[4] + 4), c->reg[0], c->reg[1], c->reg[2]);
+                         return 7;
+                     }
                      break; }
         case 0xC3: { c->eip = pop32(c); if (c->eip == STOP_EIP) return 0;
                      if (c->eip >= THUNK_BASE && c->eip < THUNK_END)
                          ve_log("RET→thunk 0x%08x (push+ret 蹦床?) [esp]=0x%08x", c->eip, M32(c->reg[4]));
+                     else if (c->eip < 0x10000000u || c->eip >= 0x28000000u) {
+                         ve_log("RET→非代码区 0x%08x esp=0x%08x [esp]=0x%08x eax=0x%08x ebx=0x%08x esi=0x%08x edi=0x%08x",
+                                c->eip, c->reg[4], M32(c->reg[4]), c->reg[0], c->reg[3], c->reg[6], c->reg[7]);
+                         return 7;
+                     }
                      break; }
         case 0xC6: { ModRM m = modrm(c, osize); SET_RM8(m, fetch8(c)); break; }
         case 0xC7: { ModRM m = modrm(c, osize); if (osize) WR16(m.ea, fetch16(c)); else SET_RM32(m, fetch32(c)); break; }
@@ -998,12 +1007,22 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
 
         case 0xE8: {   /* call rel32 */
             int32_t d = (int32_t)fetch32(c);
+            if ((uint32_t)(c->eip + d) < 0x10000000u) {
+                ve_log("E8-CALL→非代码区 target=0x%08x from=0x%08x", c->eip + d, c->eip);
+                return 7;
+            }
             push32(c, c->eip);
             c->eip += d;
             break;
         }
-        case 0xE9: { int32_t d = (int32_t)fetch32(c); c->eip += d; break; }
-        case 0xEB: { int8_t d = (int8_t)fetch8(c); c->eip += d; break; }
+        case 0xE9: { int32_t d = (int32_t)fetch32(c); c->eip += d;
+                     if (c->eip < 0x10000000u || c->eip >= 0x28000000u) {
+                         ve_log("E9-JMP→非代码区 0x%08x", c->eip); return 7;
+                     } break; }
+        case 0xEB: { int8_t d = (int8_t)fetch8(c); c->eip += d;
+                     if (c->eip < 0x10000000u || c->eip >= 0x28000000u) {
+                         ve_log("EB-JMP→非代码区 0x%08x", c->eip); return 7;
+                     } break; }
 
         case 0xF4: ve_log("hlt"); return 2;
         case 0xF5: c->flags ^= CF; break;
@@ -1059,6 +1078,12 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
                     c->reg[ESP] += 4;   /* 弹返回地址, 垫片自行处理 */
                     int pop = ve_shim_dispatch(idx, c);
                     c->reg[ESP] += pop;
+                } else if (target < 0x00400000u || (target >= 0x0D000000u && target < 0x0D200000u)) {
+                    /* 坏函数指针 (低地址/TEB区): 现场报告并中止, 防零页漫步 */
+                    ve_log("CALL坏指针 target=0x%08x from=0x%08x | eax=0x%08x [eax]=0x%08x ecx=0x%08x edx=0x%08x esi=0x%08x edi=0x%08x ebx=0x%08x",
+                           target, c->eip, c->reg[0], M32(c->reg[0]), c->reg[1], c->reg[2],
+                           c->reg[6], c->reg[7], c->reg[3]);
+                    return 6;
                 } else {
                     extern int ve_call_probe;
                     if (ve_call_probe) ve_log("CALL直跳 target=0x%08x from=0x%08x esp=0x%08x", target, c->eip, c->reg[4]);
@@ -1084,6 +1109,10 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
                     if (c->eip == STOP_EIP) return 0;
                     break;
                 }
+                if (target < 0x00400000u) {
+                    ve_log("JMP坏指针 target=0x%08x from=0x%08x", target, c->eip);
+                    return 6;
+                }
                 c->eip = target;
                 break;
             }
@@ -1105,6 +1134,10 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
 
 /* 从外部调用 guest 函数: 压参 + 哨兵返回地址, 跑到哨兵为止 */
 uint32_t ve_call_guest(VeCPU *c, uint32_t func, int nargs, const uint32_t *args) {
+    if (func && func < 0x00400000u) {
+        ve_log("ve_call_guest 坏目标 func=0x%08x nargs=%d esp=0x%08x [esp]=0x%08x",
+               func, nargs, c->reg[4], M32(c->reg[4]));
+    }
     uint32_t saved_esp = c->reg[ESP];
     /* cdecl 语义: [esp]=返回地址(STOP 哨兵), [esp+4]=arg1, ...
      * 参数从右往左压, 哨兵最后压 (曾把哨兵压最深 → ret 弹到 arg1=基址, 跳进 PE 头) */
