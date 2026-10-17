@@ -196,9 +196,29 @@ static const struct { const char *en, *zh; } kVoiceZh[] = {
     {"Xiaomeng", "晓梦"}, {"Xiaoqiu", "晓秋"}, {"Xiaorui", "晓睿"},
     {"Xiaoshuang", "晓双"}, {"Xiaoxuan", "晓萱"}, {"Xiaoyan", "晓颜"},
     {"Xiaoyou", "晓悠"}, {"Xiaozhen", "晓珍"}, {"Xiaochen", "晓辰"},
+    {"HsiaoChen", "晓臻"}, {"HsiaoYu", "晓雨"},
     {"Yunxi", "云希"}, {"Yunyang", "云扬"}, {"Yunjian", "云健"},
     {"Yunfeng", "云丰"}, {"Yunhao", "云皓"}, {"Yunye", "云野"},
+    {"YunJhe", "云哲"},
 };
+
+/* 包目录名尾段 → BCP-47 (英文包装进中文引擎槽位时, 系统语音列表的语言
+ * 分类必须正确; 未知尾段返回空, 由 router 回退引擎级 locale) */
+static void pkg_locale(const char *dir, char *out, size_t cap) {
+    static const struct { const char *seg, *loc; } kMap[] = {
+        {"Chinese-Simplified-China", "zh-CN"},
+        {"Chinese-China",            "zh-CN"},
+        {"Chinese-Taiwan",           "zh-TW"},
+        {"English-UnitedStates",     "en-US"},
+        {"English-UnitedKingdom",    "en-GB"},
+    };
+    out[0] = 0;
+    for (size_t i = 0; i < sizeof(kMap) / sizeof(kMap[0]); i++)
+        if (strstr(dir, kMap[i].seg)) {
+            snprintf(out, cap, "%s", kMap[i].loc);
+            return;
+        }
+}
 
 static void pkg_display_name(const char *dir, const char *engine_name,
                              char *out, size_t cap) {
@@ -278,6 +298,7 @@ static int ms_scan_pkgs(const char *edir, const char *ename,
         }
         snprintf(out[n].key, sizeof(out[n].key), "%s", e->d_name);
         pkg_display_name(e->d_name, ename, out[n].name, sizeof(out[n].name));
+        pkg_locale(e->d_name, out[n].locale, sizeof(out[n].locale));
         n++;
     }
     closedir(d);
@@ -302,9 +323,12 @@ static int ms_scan_pkgs(const char *edir, const char *ename,
                     if (pkgs) { ms_pkg t = pkgs[i]; pkgs[i] = pkgs[0]; pkgs[0] = t; }
                     memcpy(tmpname, out[i].name, sizeof(tmpname));
                     memcpy(tmpkey, out[i].key, sizeof(tmpkey));
+                    char tmploc[sizeof(out[i].locale)];
+                    memcpy(tmploc, out[i].locale, sizeof(tmploc));
                     out[i] = out[0];
                     snprintf(out[0].key, sizeof(out[0].key), "%s", tmpkey);
                     memcpy(out[0].name, tmpname, sizeof(out[0].name));
+                    memcpy(out[0].locale, tmploc, sizeof(out[0].locale));
                     break;
                 }
             }

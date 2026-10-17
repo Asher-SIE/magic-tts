@@ -65,14 +65,17 @@ static void engine_free_voices(mtts_engine_state *st) {
         free((void *)st->voices[i].key);
         free((void *)st->voices[i].name);
         free((void *)st->voices[i].identifier);
+        free((void *)st->voices[i].locale);
     }
     st->voice_count = 0;
 }
 
-/* 轻量发音人扫描结果 → 发音人缓存 (identifier 一并生成) */
+/* 轻量发音人扫描结果 → 发音人缓存 (identifier 一并生成;
+ * locale 适配器未填时回退引擎级) */
 static void engine_scan_voices(mtts_engine_state *st, const mtts_adapter_if *a) {
     engine_free_voices(st);
     mtts_voice_scan buf[MTTS_MAX_VOICES];
+    memset(buf, 0, sizeof(buf));
     int n = a->scan_voices ? a->scan_voices(g_engines_root, &st->desc, buf, MTTS_MAX_VOICES) : 0;
     if (n > MTTS_MAX_VOICES) n = MTTS_MAX_VOICES;
     for (int i = 0; i < n; i++) {
@@ -81,6 +84,7 @@ static void engine_scan_voices(mtts_engine_state *st, const mtts_adapter_if *a) 
         v->key = strdup(buf[i].key);
         v->name = strdup(buf[i].name);
         v->identifier = voice_identifier(st->desc.identifier, buf[i].key);
+        v->locale = strdup(buf[i].locale[0] ? buf[i].locale : st->desc.locale);
     }
 }
 

@@ -60,6 +60,7 @@ typedef struct {
     const char *key;        /* 选择键: "ydvoice01" / 包目录名; 传 "" = 默认 */
     const char *name;       /* 显示名: "永德·语音1" / "自然语音·晓晓" */
     const char *identifier; /* 系统语音 id: com.magictts.<engine>.<key> */
+    const char *locale;     /* 该发音人语言 (MS 包可为 en-US/zh-TW, 永德恒 zh-CN) */
 } mtts_voice_desc;
 
 int mtts_voice_count(const char *engine_key);

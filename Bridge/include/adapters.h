@@ -10,6 +10,7 @@
 typedef struct {
     char key[256];    /* 选择键: "ydvoice01" / MS 包目录名 */
     char name[128];   /* 显示名 */
+    char locale[32];  /* BCP-47; 适配器不清楚时留空 → router 回退引擎级 */
 } mtts_voice_scan;
 
 typedef struct mtts_adapter_if {

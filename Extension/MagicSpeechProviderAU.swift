@@ -126,11 +126,14 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
                 let vc = mtts_voice_count(engineKey)
                 for v in 0..<vc {
                     guard let vd = mtts_voice_at(engineKey, v) else { continue }
+                    /* 语言按发音人 (英文包标 en-US 等); 适配器未填时回退引擎级 */
+                    let voiceLocale = String(cString: vd.pointee.locale)
+                    let lang = voiceLocale.isEmpty ? locale : voiceLocale
                     voices.append(AVSpeechSynthesisProviderVoice(
                         name: String(cString: vd.pointee.name),
                         identifier: String(cString: vd.pointee.identifier),
-                        primaryLanguages: [locale],
-                        supportedLanguages: [locale]))
+                        primaryLanguages: [lang],
+                        supportedLanguages: [lang]))
                 }
             }
             /* 静态兜底: 语音目录枚举在系统守护进程内 in-process 实例化 AU,

@@ -7,18 +7,20 @@ TTS 引擎注册为系统语音（VoiceOver / 朗读内容 / `say` 均可用）�
 
 每个引擎的**全部发音人**都会注册为系统语音：
 
-| 发音人 | 引擎 key | 类型 | 采样率 |
-|---|---|---|---|
-| 永德·语音0 ~ 语音4 | `yongde` | 逆向复刻拼接引擎（槽位编码 + 5 个 .vl 音色库），按句自动切换 | 16 kHz |
-| 自然语音·晓晓 HD | `naturalvoice` | 微软嵌入式神经网络（流式） | 24 kHz |
-| OneCore·晓晓 HD | `onecore` | 微软嵌入式神经网络（流式） | 24 kHz |
+| 发音人 | 引擎 key | 类型 | 语言 | 采样率 |
+|---|---|---|---|---|
+| 永德·语音0 ~ 语音4 | `yongde` | 逆向复刻拼接引擎（槽位编码 + 5 个 .vl 音色库） | zh-CN | 16 kHz |
+| 自然语音·晓晓 HD / 晓臻 / 云哲 | `naturalvoice` | 微软嵌入式神经网络（流式） | zh-CN / zh-TW | 24 kHz |
+| OneCore·晓晓 HD / Andrew HD / Ava HD / Eric / Michelle | `onecore` | 微软嵌入式神经网络（流式） | zh-CN / en-US | 24 kHz |
 
 - 永德：`voices/` 下每个 `ydvoiceNN.vl` 就是一个发音人，首次使用某发音人时加载；
 - MS 引擎：`model/` 下每个含 `SynthModel.license` 的包 = 一个发音人（懒建会话）。
   **仅 .key 的 Natural 包不可用**（传入 `set_speech_synthesis_voice` 后合成
-  reason=1，需服务器侧激活）。想增加发音人：用 `scripts/fetch-voice-models.sh`
-  下载另一个 **HD** 包放进 `Engines/<key>/model/`，重启 App 即自动列出。
-  `voice.txt`（完整语音名）可指定该引擎的默认发音人。
+  reason=1，需服务器侧激活）。tts2 的 NeuralVoices 共 14 包，license 型 7 个
+  已全部装入（中文 3 + 英文 4）。想再增加发音人：用 `scripts/fetch-voice-models.sh`
+  下载另一个 **HD/license** 包放进 `Engines/<key>/model/`，重装 App 即自动列出。
+  `voice.txt`（完整语音名）可指定该引擎的默认发音人。语音 locale 按包目录名
+  尾段解析（en-US/zh-TW 等），未知回退引擎级。
 
 > **流式与延迟**（2026-10-17 实测）：MS 引擎改为 `start_speaking_ssml` + wav 文件
 > 跟随的流式架构——首块音频 ~0.73s（模型首次推理）后即开始朗读，合成以 ~1.6×
