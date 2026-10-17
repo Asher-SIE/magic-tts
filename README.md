@@ -91,6 +91,11 @@ open -a ~/Applications/MagicTTS.app       # 启动即刷新发音人注册
 
 ## 项目内资源（自包含，不再依赖旧工作区素材）
 
+> VVTTS 素材（IBM ViaVoice 中文引擎）调研完结：本体已解出至
+> `VVTTS/unpacked/`（6 个 i386 PE DLL，CRC 全过），解包器与格式笔记见
+> `tools/unpack_vvtts.py` 与 `docs/NOTES-vvtts.md`。集成需 yongde 式逆向
+> 重写（数周级），暂未立项——细节、利弊与建议次序都在 NOTES 里。
+
 ```
 resources/
 ├── yongde/
