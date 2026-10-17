@@ -12,21 +12,22 @@ import Foundation
 /// MS 引擎首块音频 ~0.8s 到达 (模型首次推理), 之后 ~1.6× 实时供给.
 public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
 
+    // MARK: - 调试探针 (统一日志对未签名构建不可用 → 写文件)
+
+    private static func probeMarkStatic(_ name: String) {
+        let dir = MagicPaths.enginesRoot.appendingPathComponent(".debug", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("entry_trace.txt")
+        let line = "\(Date()) \(name)\n"
+        if let old = try? String(contentsOf: url, encoding: .utf8) {
+            try? (old + line).write(to: url, atomically: true, encoding: .utf8)
+        } else {
+            try? line.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
     // MARK: - 引擎桥 (C)
 
-
-private static func probeMarkStatic(_ name: String) {
-    let dir = MagicPaths.enginesRoot.appendingPathComponent(".debug", isDirectory: true)
-    guard let dir else { return }
-    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    let url = dir.appendingPathComponent("entry_trace.txt")
-    let line = "\(Date()) \(name)\n"
-    if let old = try? String(contentsOf: url, encoding: .utf8) {
-        try? (old + line).write(to: url, atomically: true, encoding: .utf8)
-    } else {
-        try? line.write(to: url, atomically: true, encoding: .utf8)
-    }
-}
     private static let bridgeQueue = DispatchQueue(label: "magictts.bridge.init")
     private static var scanned = false
     private static var initStarted = false

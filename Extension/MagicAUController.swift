@@ -6,7 +6,6 @@ import Foundation
 
 private func probeMark(_ name: String) {
     let dir = MagicPaths.enginesRoot.appendingPathComponent(".debug", isDirectory: true)
-    guard let dir else { return }
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     let url = dir.appendingPathComponent("entry_trace.txt")
     let line = "\(Date()) \(name)\n"
