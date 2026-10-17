@@ -1,0 +1,37 @@
+{
+ "formula": "slot = ZC[initial] + F[final] + tone; tone 0=轻声, 1..4=声调; 找不到该声调槽时回退到组内任一存在成员",
+ "source": "authoritative: 直接从 libyongde_tts.so 0x1c8b4 (map builder) 指令流提取, 非联立求解",
+ "I": {
+  "b": 416, "c": 832, "d": 1248, "f": 2080, "g": 2496, "h": 2912, "j": 3744,
+  "k": 4160, "l": 4576, "m": 4992, "n": 5408, "p": 6240, "q": 6656, "r": 7072,
+  "s": 7488, "t": 7904, "zh": 8320, "ch": 8736, "sh": 3328, "w": 9152,
+  "x": 9568, "y": 9984, "z": 10400
+ },
+ "ZC_zero_initial": {
+  "a-class": 0, "e-class": 1665, "o-class": 5825
+ },
+ "F": {
+  "a": 0, "ai": 368, "an": 48, "ang": 288, "ao": 352,
+  "e": 64, "ei": 272, "en": 96, "eng": 80, "er": 239,
+  "o": 224, "ou": 240,
+  "i": 128, "ia": 256, "ian": 32, "iang": 192, "iao": 176, "ie": 304,
+  "iu": 384, "in": 144, "ing": 112, "iong": 160, "ong": 160,
+  "u": 320, "ua": 256, "uo": 224, "uai": 336, "ui": 16, "uan": 208,
+  "un": 400, "uang": 192,
+  "v": 336, "ve": 16, "van": 208, "vn": 400,
+  "ng": 96, "n": 96
+ },
+ "decomposition": "strip 最长声母(含 y/w), 韵母=剩余原样 (wang=w+ang, wen=w+en, you=y+ou, yuan=y+uan, yong=y+ong); 仅两个归一化: ü→v, ue→ve(jue/que/xue/yue 走 ve=16); ju/qu/xu/yu 走 u=320; lv/nv 走 v=336",
+ "merges": "o=uo=224, ia=ua=256, iang=uang=192, iong=ong=160, ui=ve=16, uan=van=208, un=vn=400, en=ng=n=96 (注意 er=239 与 ou=240 不同值, 见 errata_er)",
+ "specials": {
+  "letters_AZ": "8 + 416*k (k=0..25)",
+  "silence": 24,
+  "zero_init_a": "0 (a=1, an=49, ang=289, ao=353, ai=369 — 听审锚点全中)",
+  "zero_init_e": "1665 (e=1729=额e2 ✓)",
+  "zero_init_o": "5825 (o=6049, ou=6065)"
+ },
+ "tone_validation": "轻声0/t1..t4@+1..4: ba轻@416,八@417 (round-1 直听); an1@49; ang3@291 缺失与听审吻合; 日ri 仅+4(只有rì); mu组成员+2/+3/+4=mú/mǔ/mù(5314/5315/5316, 旧锚点 mu3@5314 系听审噪声)",
+ "errata_er": "2026-10-17 勘误: F[er]=239 (原 240 为网格解码串读, 与 ou 混淆). er 组基=1904, 成员 1906/1907/1908 = ér/ěr/èr (+2/+3/+4), +0/+1 空 (普通话无 ēr). 证据: F0 实测 1908 强降调 213→148Hz=èr, 1907 升=ér, 1906 降升=ěr; 用户耳审 1906=儿(ér). 修复前数字2/汉字二因回退链落到 1906(ér) 读成儿",
+ "coverage": "431 音节库存: 383 直接命中; 31 字需就近回退(适配器 kFallback: shei→shui, chua→chuo, biang→bian, den→deng, rua→ruo, n/ng→en, m→mu, hm→heng, fiao→biao, cei→ce, din→ding, bong→beng, wong→weng, nun→nong, eng→en); 41923 字实测仅 0.1% 音节组缺失",
+ "note": "旧版(联立求解)的 p=832 实为 c; c=833/f=2081/g=2497/m=4994 均为听审偏移噪声; 本表以二进制为准"
+}
