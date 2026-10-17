@@ -84,7 +84,17 @@ resources/
 ```
 
 永德数据以 `resources/yongde` 为权威源，`populate-engines.sh` 默认从这里安装；
-MS 引擎数据体量大（870M），不入项目目录，由组容器 + 下载脚本承担。
+MS 引擎数据体量大（容器内现 924M），不入项目目录，由组容器 + 下载脚本承担。
+⚠️ **删除外部旧工作区（tts2/ 等）前注意**：微软语音包（HD `.license`）的离线
+备份只在 tts2 的 `NeuralVoices/` 里，装进容器的是唯一可用副本；`fetch-voice-models.sh`
+依赖广荣服务器账号，未必随时可下。建议删除前把容器 Engines 目录或 tts2 的
+NeuralVoices 打包留档一份。
+
+## 诊断
+
+```bash
+swift scripts/check_system_voices.swift   # 语音目录 + AU 组件 + 探针 一页看
+```
 
 ## CLI 快速验证
 
@@ -126,5 +136,8 @@ say -v '永德·语音0' "中东西通红龙用"
 
 ## 出处文档
 
+- `docs/NOTES-voice-catalog.md` — 系统语音注册机制实测笔记（目录管道形态、两条代码
+  不变量、症状→定位排障手册、2026-10-17 事故档案）— 注册/合成问题先读它
 - `docs/NOTES-yongde-re.md` — 永德引擎完整逆向笔记（.vl 格式、编码公式、勘误）
 - `docs/yongde-formula.json` — 槽位编码权威表（`slot = ZC[声母] + F[韵母] + 声调号`）
+- `docs/NOTES-ms-streaming.md` — MS 引擎流式架构与 SDK 状态机红线
