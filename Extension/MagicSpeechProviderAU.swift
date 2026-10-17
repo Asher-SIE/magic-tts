@@ -30,10 +30,11 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
 
     private static let bridgeQueue = DispatchQueue(label: "magictts.bridge.init")
     private static var scanned = false
-    private static var initStarted = false
 
-    /// 轻量扫描 (毫秒级, 同步): speechVoices 枚举只依赖它;
-    /// 重初始化 (dlopen 引擎库, 秒级) 后台预热 — 系统查询语音列表不能被它卡住.
+    /// 轻量扫描 (毫秒级, 同步) — 仅此而已.
+    /// ⚠️ AU 构造可能在**语音目录守护进程**内发生 (系统枚举发音人时 in-process 实例化):
+    /// 那里读不了 appex 容器、更不能 dlopen 引擎库 (2026-10-17 实测, 中午的 6 连崩即
+    /// 源于在守护进程上下文里做重初始化). 引擎预热由 mtts_stream_start 首次合成时懒加载.
     private static func ensureBridge() {
         bridgeQueue.sync {
             guard !scanned else { return }
@@ -41,15 +42,6 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
             let ready = mtts_global_scan(root)
             NSLog("[MagicTTS] bridge scan: \(ready) 个引擎物料就绪")
             scanned = true
-        }
-        if !initStarted {
-            initStarted = true
-            DispatchQueue.global(qos: .userInitiated).async {
-                let loaded = mtts_global_init(nil)
-                NSLog("[MagicTTS] bridge init: \(loaded) 个引擎就绪 (后台预热完成)")
-                /* 预热完成后主动推送一次语音表更新 (宿主与扩展侧均可触发) */
-                AVSpeechSynthesisProviderVoice.updateSpeechVoices()
-            }
         }
     }
 
@@ -141,6 +133,13 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
                         supportedLanguages: [locale]))
                 }
             }
+            /* 静态兜底: 语音目录枚举在系统守护进程内 in-process 实例化 AU,
+             * 那里读不了 appex 容器 → 扫描必为空。没有兜底时 getter 在枚举上下文
+             * 永远返回空表 = 发音人从不注册 (2026-10-17 回归根因)。
+             * 合成端对未知 voiceKey 自动回退默认包, 故兜底 id 可用固定键。 */
+            if voices.isEmpty {
+                voices = Self.staticVoices
+            }
             /* 探针: 系统查询语音列表时留痕 (统一日志对未签名构建不可用) */
             Self.probeMarkStatic("speechVoices-get")
             let mark = MagicPaths.enginesRoot.appendingPathComponent(".debug/voices_queried.txt")
@@ -151,6 +150,23 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
         }
         set {}   // ObjC 属性可仅覆写 getter; 系统不写此属性
     }
+
+    /// 静态发音人表 = 标准物料布局的固定集合 (永德 5 音色 + MS 每引擎默认 1 发音人).
+    /// 永德键与 .vl 文件名一致; MS 用无键 id (解析得 voiceKey=nil → 默认包),
+    /// 故无论实际装了哪些包, 兜底 id 均可被合成端解析.
+    private static let staticVoices: [AVSpeechSynthesisProviderVoice] = {
+        func v(_ name: String, _ id: String) -> AVSpeechSynthesisProviderVoice {
+            AVSpeechSynthesisProviderVoice(
+                name: name, identifier: id,
+                primaryLanguages: ["zh-CN"], supportedLanguages: ["zh-CN"])
+        }
+        var list = (0...4).map {
+            v("永德·语音\($0)", "com.magictts.yongde.ydvoice0\($0)")
+        }
+        list.append(v("自然语音·晓晓 HD", "com.magictts.naturalvoice"))
+        list.append(v("OneCore·晓晓 HD", "com.magictts.onecore"))
+        return list
+    }()
 
     /// 合成请求 — 系统送来 SSML + voice. 流式启动 (毫秒级), 渲染块拉取.
     public override func synthesizeSpeechRequest(_ request: AVSpeechSynthesisProviderRequest) {

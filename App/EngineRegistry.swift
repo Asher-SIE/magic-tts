@@ -53,8 +53,13 @@ enum EngineRegistry {
             for v in 0..<vc {
                 guard let vd = mtts_voice_at(key, v) else { continue }
                 let ourId = String(cString: vd.pointee.identifier)
+                /* 系统目录里可能是兜底注册的引擎级 id (枚举上下文读不到包目录),
+                 * 逐级匹配: 完整 id → 引擎级 id. */
+                let engineLevelId = "com.magictts." + key
                 let systemId = systemVoices
-                    .first { $0.identifier == ourId || $0.identifier.hasSuffix("." + ourId) }?
+                    .first { $0.identifier == ourId
+                          || $0.identifier.hasSuffix("." + ourId)
+                          || $0.identifier.hasSuffix("." + engineLevelId) }?
                     .identifier
                 rows.append(VoiceRow(
                     engineKey: key,

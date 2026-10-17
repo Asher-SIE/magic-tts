@@ -10,10 +10,19 @@ import Foundation
 enum MagicPaths {
     static let appexIdentifier = "com.magictts.voices.synth"
 
-    /// appex 沙盒容器 Data 目录 (两侧进程同一物理位置:
-    /// appex 内 homeDirectoryForCurrentUser 即容器 Data; 宿主非沙盒 home 为真实家目录).
+    /// appex 沙盒容器 Data 目录 (两侧进程同一物理位置).
+    ///
+    /// ⚠️ 沙盒内外 home 含义不同, 不能拼同一条相对路径 (2026-10-17 事故根因:
+    /// appex 内 homeDirectoryForCurrentUser = 容器 Data, 再拼
+    /// "Library/Containers/<id>/Data" 会得到容器内嵌套路径, 引擎数据永远找不到
+    /// → speechVoices 空 → 不注册 + say 空音频, 而 App 试听正常, 极易误诊):
+    /// - appex 进程 (Bundle.main 即扩展): home 就是容器 Data, 直接用;
+    /// - App / CLI (无沙盒): home 为真实家目录, 拼 Containers 绝对路径.
     static var appexContainerData: URL {
-        FileManager.default.homeDirectoryForCurrentUser
+        if Bundle.main.bundleIdentifier == appexIdentifier {
+            return FileManager.default.homeDirectoryForCurrentUser
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Containers/\(appexIdentifier)/Data", isDirectory: true)
     }
 

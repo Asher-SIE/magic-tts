@@ -22,36 +22,36 @@
 	<string>1</string>
 	<key>NSExtension</key>
 	<dict>
-			<key>NSExtensionPointIdentifier</key>
-			<string>com.apple.AudioUnit</string>
-		<key>NSExtensionPrincipalClass</key>
-		<string>$(PRODUCT_MODULE_NAME).MagicAUExtensionController</string>
 		<key>NSExtensionAttributes</key>
 		<dict>
 			<key>AudioComponents</key>
 			<array>
 				<dict>
-					<key>name</key>
-					<string>Magic TTS: Speech Synthesizer</string>
 					<key>description</key>
 					<string>Magic TTS 多引擎语音合成器</string>
 					<key>manufacturer</key>
 					<string>MTTS</string>
-					<key>type</key>
-					<string>ausp</string>
-					<key>subtype</key>
-					<string>mtTS</string>
-					<key>version</key>
-					<integer>1</integer>
+					<key>name</key>
+					<string>Magic TTS: Speech Synthesizer</string>
 					<key>sandboxSafe</key>
 					<true/>
+					<key>subtype</key>
+					<string>mtT5</string>
 					<key>tags</key>
 					<array>
 						<string>Speech Synthesizer</string>
 					</array>
+					<key>type</key>
+					<string>ausp</string>
+					<key>version</key>
+					<integer>1</integer>
 				</dict>
 			</array>
 		</dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.AudioUnit</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>$(PRODUCT_MODULE_NAME).MagicAUExtensionController</string>
 	</dict>
 </dict>
 </plist>

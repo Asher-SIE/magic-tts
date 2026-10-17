@@ -90,9 +90,9 @@ MS 引擎数据体量大（870M），不入项目目录，由组容器 + 下载�
 
 ```bash
 clang -std=c11 -IBridge/include -o /tmp/mtts_cli scripts/test_cli.c Bridge/*.c -ldl -lpthread
-MT_ENGINES="$HOME/Library/Group Containers/com.magictts.shared/Engines" \
+MT_ENGINES="$HOME/Library/Containers/com.magictts.voices.synth/Data/Engines" \
   /tmp/mtts_cli yongde "中东西通红龙用"
-say -v '永德' "中东西通红龙用"
+say -v '永德·语音0' "中东西通红龙用"
 ```
 
 每次合成会在 `Engines/.debug/last_<key>.wav` 留下引擎侧输出，用于与宿主收到的
@@ -102,8 +102,22 @@ say -v '永德' "中东西通红龙用"
 
 1. **替换 app 后要 `pkill -f MagicTTS; pkill -f MagicTTSSynth`**——残留 appex
    进程会让后续 `say` 挂起。
-2. **新 AU 组件首次不被发现**：`killall speechvoiced` 强制语音目录重扫。
-3. MS 引擎冷启动数秒；渲染块有 15s 有界等待（离线 AU 模式）。
+2. **改完 app 重装后若语音没出现在系统目录**：`AVSpeechSynthesisProviderVoice.
+   updateSpeechVoices()` 对"未变化的 app"不触发重枚举。可靠触发法 = 重装 app
+   (`rm -rf` + `cp -R` + `open`)，或删除/安装任一带语音扩展的 app，或重启。
+   （旧坑清单里的 `killall speechvoiced` 在 macOS 26 上该进程根本不存在。）
+3. **`speechVoices` getter 必须零文件依赖可用**：系统枚举发音人时在守护进程
+   上下文里实例化 AU，那里读不了 appex 容器——扫描拿不到引擎数据。getter
+   末尾的静态兜底表就是为这个准备的（2026-10-17 回归根因：无兜底时枚举侧
+   永远上报 0 条 = 发音人从不注册，且 App 内试听正常、极易误诊为"管道僵死"）。
+4. **沙盒内外 home 含义不同**：appex 内 `homeDirectoryForCurrentUser` = 容器
+   Data 本身；宿主/CLI 内才是真实家目录。拼引擎路径必须区分进程上下文
+   （`MagicPaths.appexContainerData`，同日事故根因二：拼同一条相对路径得到
+   容器内嵌套路径，appex 永远找不到引擎 → say 空音频 0.01s）。
+5. **AU 组件码 (subtype/manufacturer) 是语音目录的缓存键**，首次枚举成功后
+   与当时的 appex bundle id 绑定（voice id 前缀由此而来）。身份实验轮换后
+   不要复用旧组件码，否则目录持续用陈旧前缀（现用 `mtT5`）。
+6. MS 引擎冷启动数秒；渲染块有 15s 有界等待（离线 AU 模式）。
 
 ## 二期方向
 
