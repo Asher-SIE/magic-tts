@@ -30,7 +30,7 @@ void ve_fmark_free(uint32_t gfile) {
 }
 
 /* ---------------- thunk 表 ---------------- */
-#define MAX_SHIMS 400
+#define MAX_SHIMS 1200
 typedef struct ShimEnt { char dll[16]; char func[140]; char mod[16]; int borp; } ShimEnt;
 /* borp: 导入方为 Borland 约定 (ibmeci/torrent) 的 new/delete 被调方弹栈 */
 static ShimEnt g_shims[MAX_SHIMS];
@@ -51,7 +51,10 @@ void *ve_shim_slot_mod(const char *dll, const char *func, const char *mod) {
             return (void *)(uintptr_t)(0x0F000000u + (uint32_t)i * 8);
         }
     }
-    if (g_nshims >= MAX_SHIMS) return (void *)(uintptr_t)0x0EF00000u;
+    if (g_nshims >= MAX_SHIMS) {
+        ve_log("!! thunk 表溢出 (%s!%s) → 哨兵", dll, func);
+        return (void *)(uintptr_t)0x0EF00000u;
+    }
     snprintf(g_shims[g_nshims].dll, 16, "%s", dll);
     snprintf(g_shims[g_nshims].func, 140, "%s", func);
     snprintf(g_shims[g_nshims].mod, 16, "%s", mod);
@@ -977,3 +980,5 @@ int ve_shim_name(int idx, char *buf, int cap) {
 }
 
 int ve_reg_trace = 1;
+
+int ve_call_probe = 1;

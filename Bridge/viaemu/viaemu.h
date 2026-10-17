@@ -67,6 +67,7 @@ typedef struct VeModule {
     char name[16];
 } VeModule;
 const VeModule *ve_pe_modules(int *count);
+void ve_pe_iat_check(void);   /* IAT 体检: 报告异常槽 */
 uint32_t ve_pe_load(const char *path, uint32_t want_base, const char *name);
 uint32_t ve_pe_export(uint32_t base, const char *func);
 

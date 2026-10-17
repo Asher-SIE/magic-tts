@@ -329,7 +329,11 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
                    c->reg[0], c->reg[1]);
         }
         if (c->eip >= THUNK_BASE && c->eip < THUNK_END) {
-            ve_log("eip 落入 thunk 区 (jmp/call 未捕获) 0x%08x", c->eip);
+            extern int ve_shim_name(int idx, char *buf, int cap);
+            char nm[160];
+            ve_shim_name((int)((c->eip - THUNK_BASE) / 8), nm, sizeof(nm));
+            ve_log("eip 落入 thunk 区 0x%08x = %s | [esp]=0x%08x [esp+4]=0x%08x [esp+8]=0x%08x esp=0x%08x",
+                   c->eip, nm, M32(c->reg[4]), M32(c->reg[4] + 4), M32(c->reg[4] + 8), c->reg[4]);
             return 1;
         }
         if (c->eip == STOP_EIP) return 0;
@@ -746,8 +750,14 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
             break;
         }
         case 0xC2: { uint16_t n = fetch16(c); c->eip = pop32(c); c->reg[ESP] += n;
-                     if (c->eip == STOP_EIP) return 0; break; }
-        case 0xC3: { c->eip = pop32(c); if (c->eip == STOP_EIP) return 0; break; }
+                     if (c->eip == STOP_EIP) return 0;
+                     if (c->eip >= THUNK_BASE && c->eip < THUNK_END)
+                         ve_log("RET→thunk 0x%08x (push+ret 蹦床?) [esp]=0x%08x", c->eip, M32(c->reg[4]));
+                     break; }
+        case 0xC3: { c->eip = pop32(c); if (c->eip == STOP_EIP) return 0;
+                     if (c->eip >= THUNK_BASE && c->eip < THUNK_END)
+                         ve_log("RET→thunk 0x%08x (push+ret 蹦床?) [esp]=0x%08x", c->eip, M32(c->reg[4]));
+                     break; }
         case 0xC6: { ModRM m = modrm(c, osize); SET_RM8(m, fetch8(c)); break; }
         case 0xC7: { ModRM m = modrm(c, osize); if (osize) WR16(m.ea, fetch16(c)); else SET_RM32(m, fetch32(c)); break; }
         case 0xC8: {   /* enter */
@@ -1049,7 +1059,11 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
                     c->reg[ESP] += 4;   /* 弹返回地址, 垫片自行处理 */
                     int pop = ve_shim_dispatch(idx, c);
                     c->reg[ESP] += pop;
-                } else c->eip = target;
+                } else {
+                    extern int ve_call_probe;
+                    if (ve_call_probe) ve_log("CALL直跳 target=0x%08x from=0x%08x esp=0x%08x", target, c->eip, c->reg[4]);
+                    c->eip = target;
+                }
                 break;
             }
             case 3: ve_log("callf"); return 2;

@@ -156,6 +156,7 @@ int viaemu_load(const char *dir) {
         return -3;
     }
     g_loaded = 1;
+    ve_pe_iat_check();
     ve_log("viaemu 就绪 (eciNew@0x%08x)", f_eciNew);
     return 0;
 }

@@ -10,6 +10,11 @@ static int g_nmods;
 
 int ve_region_init(void);
 
+/* IAT 槽位登记 (体检/诊断用) */
+typedef struct { uint32_t addr; char dll[16]; char func[128]; } IatEnt;
+static IatEnt g_iat[1600];
+static int g_niat;
+
 static uint32_t rva2off(uint32_t rva, uint32_t *secmap, int nsec) {
     /* secmap: 每节 [va, vsize, raw, rawsz]×4 */
     for (int i = 0; i < nsec; i++) {
@@ -124,11 +129,12 @@ uint32_t ve_pe_load(const char *path, uint32_t want_base, const char *name) {
                 }
                 void *slot = ve_shim_slot_mod(dll, fname, name);
                 uint32_t *iat_entry = (uint32_t *)(img + iat + idx * 4);
-                if (slot) {
-                    *iat_entry = (uint32_t)(uintptr_t)slot;
-                } else {
-                    *iat_entry = (uint32_t)(uintptr_t)ve_shim_slot(dll, "__ve_missing");
-                    ve_log("%s 缺失导入 %s!%s", name, dll, fname);
+                *iat_entry = (uint32_t)(uintptr_t)slot;
+                if (g_niat < 1600) {
+                    g_iat[g_niat].addr = want_base + iat + idx * 4;
+                    snprintf(g_iat[g_niat].dll, 16, "%s", dll);
+                    snprintf(g_iat[g_niat].func, 128, "%s", fname);
+                    g_niat++;
                 }
             }
             off += 20;
@@ -175,4 +181,15 @@ uint32_t ve_pe_export(uint32_t base, const char *func) {
         if (strcmp(n, func) == 0) return base + funcs[ords[i]];
     }
     return 0;
+}
+
+/* IAT 体检: 报告不在 thunk 区的槽 (哨兵/未写/旧基址) */
+void ve_pe_iat_check(void) {
+    for (int i = 0; i < g_niat; i++) {
+        uint32_t v = *(uint32_t *)GADDR(g_iat[i].addr);
+        extern void *ve_thunk_end_pub(void);
+        if (v < 0x0F000000u || v >= 0x0F000000u + 1200u * 8u) {
+            ve_log("IAT 异常 @0x%08x %s!%s → 0x%08x", g_iat[i].addr, g_iat[i].dll, g_iat[i].func, v);
+        }
+    }
 }

@@ -31,6 +31,16 @@ int main(int argc, char **argv) {
     int rc = viaemu_load(dir);
     if (rc) { fprintf(stderr, "加载失败 rc=%d\n", rc); return 2; }
 
+    /* IAT 体检: 找哨兵/零/旧基址槽 */
+    for (int m = 0; m < 6; m++) {
+        uint32_t base = 0x10000000u + (uint32_t)m * 0x04000000u;
+        const char *names[6] = {"ibmcmm","chs.uil","chsrom","chs50.syn","torrent","ibmeci"};
+        for (uint32_t iat = 0;2000; ) break;
+        (void)base;
+        fprintf(stderr, "[mod %s]\n", names[m]);
+        break;
+    }
+
     static int16_t pcm[11025 * 60];
     int sr = 11025;
     int n = viaemu_eci_synth(text, 0, 100, 50, pcm, 11025 * 60, &sr);

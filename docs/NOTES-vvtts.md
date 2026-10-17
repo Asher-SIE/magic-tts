@@ -143,3 +143,21 @@ ibmeci DllMain 深入 CRT/注册表初始化后, 尾跳 memcpy 收到 n=垃圾 �
 - 新卡点 B (A 之后): vtable NULL+0x40 虚调用 (对象加载返回 NULL, 链
   0x1001fdd6→0x1000be05)
 - REGQ 追踪已确认 eciNew 阶段只查 TraceLevel/Path_Trace (LanguageIndependent)
+
+## 九、第五轮进展 (里程碑: 全流水线无崩溃贯通)
+
+**卡点 A 已解**: thunk 表容量 400→1200 (6 模块按模块去重后 ~450+ 导入溢出,
+静默喂哨兵 → RegOpenKeyExA 槽变 0x0EF00000 哨兵 → 被直跳)。IAT 登记表同步
+扩容; 体检阈值同步。溢出现在有告警。
+
+**当前状态**: eciNewEx → SetOutputBuffer → RegisterCallback → AddText →
+Synthesize → Synchronize → eciDelete **全链路无崩溃跑完** (历史首次),
+唯返回 0 样本 — 因引擎初始化中一处中断:
+- 现场: CreateWindowExA → new×2 之后, 新对象 vtable 指针 = **0x15A6**
+  (未重定位的旧值形态), call [vtable+2] → eip≈0x15a8 → 在零页漫步至
+  0x0D001000 (TEB2, bytes=ff ff) 报 FF/7
+- 下轮抓手: VE_TRACE 定位存 0x15A6 的构造点 (疑点: ① 某构造函数从
+  GetProcAddress/注册表数据抄 vtable ② chs50 运行期拷贝带旧基址指针且
+  未经 reloc 覆盖的通道 ③ 尾调用 new 返回后 ebp 未恢复的旧问题的另一
+  变体 — 看 new×2 返回链是否又跳层)
+- 剩余已知噪音: chs50.syn DllMain 仍 rc=5 (模块基址跳) — 不阻塞主线
