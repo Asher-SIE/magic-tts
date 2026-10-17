@@ -254,13 +254,19 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
         if (!strcmp(fn, "InterlockedDecrement")) { int32_t *p = (int32_t *)ve_guest_ptr(A(0)); c->reg[0] = (uint32_t)(--(*p)); STD(4); return pop; }
         if (!strcmp(fn, "IsBadReadPtr") || !strcmp(fn, "IsBadWritePtr")) { STD(8); c->reg[0] = ve_guest_ptr(A(0)) ? 0 : 1; goto done; }
         if (!strcmp(fn, "IsBadCodePtr")) { STD(4); c->reg[0] = 0; goto done; }
-        if (!strcmp(fn, "HeapAlloc")) { STD(12); c->reg[0] = ve_heap_alloc(A(2)); goto done; }
+        if (!strcmp(fn, "HeapAlloc")) {
+            if (A(2) > 0x10000000) ve_log("HeapAlloc(0x%08x) 可疑 ret=0x%08x", A(2), M32H(c->reg[4]));
+            STD(12); c->reg[0] = ve_heap_alloc(A(2)); goto done;
+        }
         if (!strcmp(fn, "HeapReAlloc")) { STD(16); c->reg[0] = ve_heap_realloc(A(1), A(3)); goto done; }
         if (!strcmp(fn, "HeapFree")) { STD(12); ve_heap_free(A(1)); c->reg[0] = 1; goto done; }
         if (!strcmp(fn, "HeapSize")) { STD(12); uint32_t *hh = ve_guest_ptr(A(1) - 8); c->reg[0] = hh ? hh[0] - 8 : 0; goto done; }
         if (!strcmp(fn, "HeapCreate")) { STD(12); c->reg[0] = 1; goto done; }
         if (!strcmp(fn, "HeapDestroy")) { STD(4); c->reg[0] = 1; goto done; }
-        if (!strcmp(fn, "VirtualAlloc")) { STD(16); c->reg[0] = ve_heap_alloc(A(1)); goto done; }
+        if (!strcmp(fn, "VirtualAlloc")) {
+            if (A(1) > 0x10000000) ve_log("VirtualAlloc(0x%08x) 可疑 ret=0x%08x", A(1), M32H(c->reg[4]));
+            STD(16); c->reg[0] = ve_heap_alloc(A(1)); goto done;
+        }
         if (!strcmp(fn, "VirtualFree")) { STD(12); ve_heap_free(A(0)); c->reg[0] = 1; goto done; }
         static __thread uint32_t tls_slots[64];
         if (!strcmp(fn, "TlsAlloc")) { c->reg[0] = 1; return 0; }
@@ -509,18 +515,20 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
         };
         /* 句柄编码: 0x100=ECIINI 根, 0x101="6.0", 0x102="LanguageIndependent" */
         if (!strcmp(fn, "RegOpenKeyExA")) {
-            uint32_t parent = A(0);
             const char *sub = cp(A(1));
-            uint32_t hk = 0;
-            if (strstr(sub, "ECIINI")) hk = 0x100;
-            else if (parent == 0x100 && !strcmp(sub, "6.0")) hk = 0x101;
-            else if (parent == 0x100 && !strcmp(sub, "LanguageIndependent")) hk = 0x102;
-            if (hk) {
-                if (A(4)) *(uint32_t *)ve_guest_ptr(A(4)) = hk;
-                STD(20); c->reg[0] = 0; goto done;
+            uint32_t parent = A(0);
+            uint32_t hk = 0x1FF;   /* 通用句柄 (一律成功, 保持 DllMain 原走向) */
+            if (strstr(sub, "ECIINI")) {
+                hk = 0x100;
+                if (strstr(sub, "6.0")) hk = 0x101;
+                else if (strstr(sub, "LanguageIndependent")) hk = 0x102;
+            } else if (parent == 0x100) {
+                if (strstr(sub, "6.0")) hk = 0x101;
+                else if (strstr(sub, "LanguageIndependent")) hk = 0x102;
+                else hk = 0x100;
             }
-            if (A(4)) *(uint32_t *)ve_guest_ptr(A(4)) = 0x1FF;
-            STD(20); c->reg[0] = 2; goto done;
+            if (A(4)) *(uint32_t *)ve_guest_ptr(A(4)) = hk;
+            STD(20); c->reg[0] = 0; goto done;   /* ERROR_SUCCESS */
         }
         if (!strcmp(fn, "RegCreateKeyExA")) {
             if (A(6)) *(uint32_t *)ve_guest_ptr(A(6)) = 0x1FF;
@@ -536,6 +544,11 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
                     if (!strcmp(k_ini[i].sub, subname) && !strcmp(k_ini[i].name, name)) {
                         val = k_ini[i].val; break;
                     }
+                }
+            } else {
+                /* 根/通用句柄: 全表搜索 */
+                for (unsigned i = 0; i < sizeof(k_ini) / sizeof(k_ini[0]); i++) {
+                    if (!strcmp(k_ini[i].name, name)) { val = k_ini[i].val; break; }
                 }
             }
             if (val) {
@@ -644,11 +657,35 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
             }
             c->reg[0] = A(0); memset(ve_guest_ptr(A(0)), A(1) & 0xFF, A(2)); return 0;
         }
-        if (!strcmp(fn, "malloc")) { c->reg[0] = ve_heap_alloc(A(0)); return 0; }
-        if (!strcmp(fn, "calloc")) { uint32_t sz = A(0) * A(1); uint32_t p = ve_heap_alloc(sz); if (p) memset(ve_guest_ptr(p), 0, sz); c->reg[0] = p; return 0; }
+        if (!strcmp(fn, "malloc")) {
+            if (A(0) > 0x10000000) {
+                /* 超大分配 = 疑似指针当大小 (0x3EFExxxx=栈地址) — 打印调用现场 */
+                extern const VeModule *ve_pe_modules(int *);
+                int n; const VeModule *ms = ve_pe_modules(&n);
+                ve_log("malloc(0x%08x) 可疑! ret=0x%08x", A(0), M32H(c->reg[4]));
+                for (int i = 1; i < 40; i++) {
+                    uint32_t v = M32H(c->reg[4] + i * 4);
+                    for (int k = 0; k < n; k++)
+                        if (v >= ms[k].base + 0x1000 && v < ms[k].base + ms[k].size) {
+                            ve_log("   栈+0x%02x: %s+0x%x", i * 4, ms[k].name, v - ms[k].base);
+                            k = n;
+                        }
+                }
+            }
+            c->reg[0] = ve_heap_alloc(A(0));
+            return 0;
+        }
+        if (!strcmp(fn, "calloc")) {
+            uint32_t sz = A(0) * A(1);
+            if (sz > 0x10000000) ve_log("calloc(0x%x*0x%x) 可疑 ret=0x%08x", A(0), A(1), M32H(c->reg[4]));
+            uint32_t p = ve_heap_alloc(sz); if (p) memset(ve_guest_ptr(p), 0, sz); c->reg[0] = p; return 0;
+        }
         if (!strcmp(fn, "realloc")) { c->reg[0] = ve_heap_realloc(A(0), A(1)); return 0; }
         if (!strcmp(fn, "free")) { ve_heap_free(A(0)); return 0; }
-        if (!strcmp(fn, "??2@YAPAXI@Z")) { c->reg[0] = ve_heap_alloc(A(0)); return 0; }   /* operator new */
+        if (!strcmp(fn, "??2@YAPAXI@Z")) {
+            if (A(0) > 0x10000000) ve_log("new(0x%08x) 可疑 ret=0x%08x", A(0), M32H(c->reg[4]));
+            c->reg[0] = ve_heap_alloc(A(0)); return 0;   /* operator new */
+        }
         if (!strcmp(fn, "??3@YAXPAX@Z")) { ve_heap_free(A(0)); return 0; }                /* operator delete */
         if (!strcmp(fn, "strlen")) { c->reg[0] = (uint32_t)strlen(cp(A(0))); return 0; }
         if (!strcmp(fn, "strcpy")) { c->reg[0] = A(0); strcpy(cp(A(0)), cp(A(1))); return 0; }

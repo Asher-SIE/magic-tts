@@ -105,3 +105,17 @@ ibmeci DllMain 深入 CRT/注册表初始化后, 尾跳 memcpy 收到 n=垃圾 �
 - **当前卡点**: 引擎内部经 wrapper 调 RegOpenKeyExA 时 phkResult 已是垃圾 (0x56) —
   上游某处仍有一处栈漂移; 定位法: VE_TRACE 该 wrapper (0x10020ae0) 的调用者,
   检查其入参来源 (其 phkResult 应为栈上 leal 地址, 却是 0x56)
+
+## 七、第三轮进展 (续)
+
+- 注册表键一律打开成功 + 子键路径含 "6.0"/"LanguageIndependent" 直接映射 +
+  根句柄全表回落搜索 (曾因打开失败改变 DllMain 走向造成回归, 已修)
+- 崩溃处理器升级: 沿 guest 栈扫描模块代码区返回地址链 (直接给出调用链)
+- 分配垫片大额日志: new/calloc/HeapAlloc/VirtualAlloc > 0x10000000 打印现场
+- **当前精确卡点**: `operator new(0x3EFEFF9F)` — 大小参数为栈地址值, 且
+  A(0) 与返回地址槽同值 → 调用形态为 "push size; jmp new" (无 call 返回地址)
+  或该处栈已漂移。两次 1GB 分配即源于此 (new 返回 0 → 上游对象 NULL →
+  ctor this=NULL 崩于 +0x4c, 调用链 0x1000d14e→0x100134f0 已定位)。
+- **下轮第一步**: 在 ??2 垫片打印 [esp-8..esp+12] 6 槽 + 用 objdump 查
+  0x1000b416 附近 (上次 memset ret=0x2400b41b) 该 new 调用点的真实指令
+  (确认 push+jmp 还是 call), 若为栈漂移则回溯该函数入口的固定调整差

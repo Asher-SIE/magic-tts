@@ -18,10 +18,21 @@ static void ve_fault_handler(int sig, siginfo_t *si, void *ctx) {
         ve_log("宿主 fault sig=%d addr=0x%llx | guest_eip=0x%08x esp=0x%08x seg_fs=0x%08x seg_add=0x%08x guest_addr=0x%llx",
                sig, fa, c->eip, c->reg[4], c->seg_fs, c->seg_add,
                fa >= g_ve_off ? fa - g_ve_off : 0ull);
-        /* 打印 guest 栈上疑似返回地址 (定位错位 ret) */
-        for (int i = 0; i < 6; i++) {
-            uint32_t v = *(uint32_t *)(c->reg[4] + i * 4 + g_ve_off);
-            ve_log("  [esp+0x%x] = 0x%08x", i * 4, v);
+        /* 栈回溯: 沿栈找指向模块代码区的返回地址链 */
+        {
+            extern const VeModule *ve_pe_modules(int *);
+            int n; const VeModule *ms = ve_pe_modules(&n);
+            int found = 0;
+            for (int i = 0; i < 300 && found < 10; i++) {
+                uint32_t v = *(uint32_t *)(c->reg[4] + i * 4 + g_ve_off);
+                for (int k = 0; k < n; k++) {
+                    if (v >= ms[k].base + 0x1000 && v < ms[k].base + ms[k].size) {
+                        ve_log("  栈+0x%03x: 0x%08x (%s+0x%x)", i * 4, v, ms[k].name, v - ms[k].base);
+                        found++;
+                        break;
+                    }
+                }
+            }
         }
     } else {
         ve_log("宿主 fault sig=%d addr=%p (无 CPU 上下文)", sig, si->si_addr);
@@ -91,6 +102,12 @@ uint32_t ve_heap_alloc(uint32_t size) {
     if (size == 0) size = 1;
     size = (size + BLOCK_HDR + 15) & ~15u;
 
+    if (size > 0x30000000) {
+        extern const VeModule *ve_pe_modules(int *);
+        int n; const VeModule *ms = ve_pe_modules(&n);
+        ve_log("堆分配 0x%08x (疑似指针当大小)", size);
+        (void)ms; (void)n;
+    }
     pthread_mutex_lock(&g_heap_lock);
     static int inited = 0;
     if (!inited) {
