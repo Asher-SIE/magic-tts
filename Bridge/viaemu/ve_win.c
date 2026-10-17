@@ -31,22 +31,31 @@ void ve_fmark_free(uint32_t gfile) {
 
 /* ---------------- thunk 表 ---------------- */
 #define MAX_SHIMS 400
-typedef struct ShimEnt { char dll[16]; char func[140]; } ShimEnt;
+typedef struct ShimEnt { char dll[16]; char func[140]; char mod[16]; int borp; } ShimEnt;
+/* borp: 导入方为 Borland 约定 (ibmeci/torrent) 的 new/delete 被调方弹栈 */
 static ShimEnt g_shims[MAX_SHIMS];
 static int g_nshims;
 
 void *ve_shim_slot(const char *dll, const char *func) {
+    return ve_shim_slot_mod(dll, func, "");
+}
+
+void *ve_shim_slot_mod(const char *dll, const char *func, const char *mod) {
     if (strcmp(func, "__ve_missing") == 0) {
         return (void *)(uintptr_t)0x0EF00000u;   /* 缺失哨兵槽 */
     }
+    int borp = (!strcmp(mod, "ibmeci") || !strcmp(mod, "torrent"));
     for (int i = 0; i < g_nshims; i++) {
-        if (strcmp(g_shims[i].func, func) == 0 && strcasecmp(g_shims[i].dll, dll) == 0) {
+        if (strcmp(g_shims[i].func, func) == 0 && strcasecmp(g_shims[i].dll, dll) == 0
+            && strcmp(g_shims[i].mod, mod) == 0) {
             return (void *)(uintptr_t)(0x0F000000u + (uint32_t)i * 8);
         }
     }
     if (g_nshims >= MAX_SHIMS) return (void *)(uintptr_t)0x0EF00000u;
     snprintf(g_shims[g_nshims].dll, 16, "%s", dll);
     snprintf(g_shims[g_nshims].func, 140, "%s", func);
+    snprintf(g_shims[g_nshims].mod, 16, "%s", mod);
+    g_shims[g_nshims].borp = borp;
     return (void *)(uintptr_t)(0x0F000000u + (uint32_t)g_nshims++ * 8);
 }
 
@@ -537,6 +546,8 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
         if (!strcmp(fn, "RegQueryValueExA")) {
             uint32_t hk = A(0);
             const char *name = cp(A(1));
+            extern int ve_reg_trace;
+            if (ve_reg_trace) ve_log("REGQ hk=0x%x name=%s", hk, name);
             const char *subname = hk == 0x101 ? "6.0" : (hk == 0x102 ? "LanguageIndependent" : NULL);
             const char *val = NULL;
             if (subname) {
@@ -575,7 +586,15 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
         }
         if (!strcmp(fn, "RegCloseKey")) { STD(4); c->reg[0] = 0; goto done; }
         if (!strcmp(fn, "RegSetValueExA")) { STD(24); c->reg[0] = 0; goto done; }
-        if (!strcmp(fn, "RegQueryInfoKeyA")) { STD(48); c->reg[0] = 0; goto done; }
+        if (!strcmp(fn, "RegQueryInfoKeyA")) {
+            /* 12 参; 计数出参必须写 (调用方据 lpcMax*Len 分配缓冲!) */
+            uint32_t outs[8] = { A(4), A(5), A(6), A(7), A(8), A(9), A(10), 0 };
+            uint32_t vals[8] = { 0, 260, 260, 0, 260, 0x400, 4, 0 };
+            for (int i = 0; i < 7; i++)
+                if (outs[i]) *(uint32_t *)ve_guest_ptr(outs[i]) = vals[i];
+            if (A(11)) memset(ve_guest_ptr(A(11)), 0, 8);   /* lpftLastWriteTime */
+            STD(48); c->reg[0] = 0; goto done;
+        }
         if (!strcmp(fn, "RegEnumKeyExA")) { STD(32); c->reg[0] = 259; goto done; }
         if (!strcmp(fn, "RegDeleteKeyA") || !strcmp(fn, "RegDeleteValueA")) { STD(8); c->reg[0] = 2; goto done; }
         if (!strcmp(fn, "InitializeSecurityDescriptor") || !strcmp(fn, "SetSecurityDescriptorDacl")) { STD(8); c->reg[0] = 1; goto done; }
@@ -683,10 +702,16 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
         if (!strcmp(fn, "realloc")) { c->reg[0] = ve_heap_realloc(A(0), A(1)); return 0; }
         if (!strcmp(fn, "free")) { ve_heap_free(A(0)); return 0; }
         if (!strcmp(fn, "??2@YAPAXI@Z")) {
-            if (A(0) > 0x10000000) ve_log("new(0x%08x) 可疑 ret=0x%08x", A(0), M32H(c->reg[4]));
-            c->reg[0] = ve_heap_alloc(A(0)); return 0;   /* operator new */
+            if (A(0) > 0x10000000) {
+                /* 真实调用者返回地址在 [esp-4] (FF/2 压过返回地址又弹掉, 值仍在) */
+                ve_log("new(0x%08x) 可疑 caller=0x%08x [esp+4]=0x%08x [esp+8]=0x%08x",
+                       A(0), M32H(c->reg[4] - 4), M32H(c->reg[4] + 4), M32H(c->reg[4] + 8));
+            }
+            c->reg[0] = ve_heap_alloc(A(0));
+            if (g_shims[idx].borp) c->reg[4] += 4;   /* Borland(ibmeci/torrent): 被调方弹参 */
+            return 0;   /* operator new */
         }
-        if (!strcmp(fn, "??3@YAXPAX@Z")) { ve_heap_free(A(0)); return 0; }                /* operator delete */
+        if (!strcmp(fn, "??3@YAXPAX@Z")) { ve_heap_free(A(0)); if (g_shims[idx].borp) c->reg[4] += 4; return 0; }
         if (!strcmp(fn, "strlen")) { c->reg[0] = (uint32_t)strlen(cp(A(0))); return 0; }
         if (!strcmp(fn, "strcpy")) { c->reg[0] = A(0); strcpy(cp(A(0)), cp(A(1))); return 0; }
         if (!strcmp(fn, "strncpy")) { c->reg[0] = A(0); strncpy(cp(A(0)), cp(A(1)), A(2)); return 0; }
@@ -940,3 +965,15 @@ int ve_pop_msg(uint32_t *m) {
     pthread_mutex_unlock(&g_msgq_mu);
     return 1;
 }
+
+int ve_ctor_trace = 1;
+
+uint32_t g_watch_addr = 0;
+
+int ve_shim_name(int idx, char *buf, int cap) {
+    if (idx < 0 || idx >= g_nshims) { snprintf(buf, cap, "?%d", idx); return 0; }
+    snprintf(buf, cap, "%s!%s", g_shims[idx].dll, g_shims[idx].func);
+    return 1;
+}
+
+int ve_reg_trace = 1;

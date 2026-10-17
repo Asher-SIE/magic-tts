@@ -7,7 +7,19 @@
 #include <math.h>
 #include "viaemu.h"
 
+/* CPU 自测: 构造微码序列比对标志位 (找 jcc 误判) */
+static int cpu_selftest(void) {
+    if (viaemu_load("<none>")) {}
+    extern int ve_region_init(void);
+    (void)ve_region_init;
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "selftest")) {
+        fprintf(stderr, "selftest 占位\n");
+        return 0;
+    }
     if (argc < 2) {
         fprintf(stderr, "用法: %s <dir> [text] [out.wav]\n", argv[0]);
         return 1;

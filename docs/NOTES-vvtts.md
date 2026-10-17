@@ -119,3 +119,27 @@ ibmeci DllMain 深入 CRT/注册表初始化后, 尾跳 memcpy 收到 n=垃圾 �
 - **下轮第一步**: 在 ??2 垫片打印 [esp-8..esp+12] 6 槽 + 用 objdump 查
   0x1000b416 附近 (上次 memset ret=0x2400b41b) 该 new 调用点的真实指令
   (确认 push+jmp 还是 call), 若为栈漂移则回溯该函数入口的固定调整差
+
+## 八、第四轮进展 (标志位大修 + 编译器混用发现)
+
+**本轮三个永久性修复**:
+1. **CPU 标志位三连 bug** (scripts/viaemu_cputest.c 自测 11/11 全过):
+   - SF 提取错误: `r & SF` 取了位7, 应为 `(r>>24) & SF` (位31→位7) — 影响
+     一切符号分支!  ② PF 奇偶表反了 → __builtin_parity  ③ inc/dec 的 AF
+     公式 (低半字节 0xF/0x0 判定)。此前所有"玄学走错分支"多源于此。
+2. **Borland/MSVC 混用约定**: 同一批 DLL 里 ibmeci/torrent 的 operator new/
+   delete 按被调方弹 4 (Borland), chs.uil 等按 cdecl 调用方清栈 (实测
+   0x1000d11d push size; call new; 无清理)。thunk 表改造为带导入方模块名
+   (ve_shim_slot_mod), borp 标记仅 ibmeci/torrent 弹参。
+3. RegQueryInfoKeyA 出参填写 (调用方据 lpcMax*Len 分配缓冲, 之前读栈残渣
+   → 1GB 分配元凶); operator new(0x143) 链路打通。
+
+**当前最新前沿** (下轮从这里继续):
+- 引擎线程生态已活跃: _beginthreadex + CreateWindowExA + GetMessage 循环 +
+  主线程并行动作 ✓; eciNew 深入到 "加载模块对象→虚调用" 阶段
+- 新卡点 A: "eip 落入 thunk 区" (eax=0xF003F) — 引擎把导入地址当函数指针
+  存进数据后 call — 查 0x24001c60/0x24001c93 的调用形态 (call *eax 应已被
+  FF/2 覆盖, 疑 push+ret 或 lea 直跳形态)
+- 新卡点 B (A 之后): vtable NULL+0x40 虚调用 (对象加载返回 NULL, 链
+  0x1001fdd6→0x1000be05)
+- REGQ 追踪已确认 eciNew 阶段只查 TraceLevel/Path_Trace (LanguageIndependent)

@@ -42,7 +42,9 @@ static const uint8_t parity_tab[256] = {
     4,0,0,4,0,4,4,0,0,4,4,0,4,0,0,4,0,4,4,0,4,0,0,4,4,0,0,4,0,4,4,0,
     0,4,4,0,4,0,0,4,4,0,0,4,0,4,4,0,4,0,0,4,0,4,4,0,0,4,4,0,4,0,0,4,
 };
-static inline uint32_t pf_of(uint32_t v) { return parity_tab[v & 0xFF] ? 0 : PF; }
+static inline uint32_t pf_of(uint32_t v) {
+    return __builtin_parity(v & 0xFF) == 0 ? PF : 0;   /* 偶数个 1 → PF=1 */
+}
 
 /* ---- x87 ---- */
 #define FST(i) (c->st[(c->ftop + (i)) & 7])
@@ -134,7 +136,7 @@ static ModRM modrm(VeCPU *c, int osize) {
 static void add_flags(VeCPU *c, uint32_t a, uint32_t b, uint32_t r) {
     uint32_t f = pf_of(r);
     if (r == 0) f |= ZF;
-    f |= r & SF;
+    f |= (r >> 24) & SF;
     if (r < a) f |= CF;
     if ((~(a ^ b) & (a ^ r) & 0x80000000u)) f |= OF;
     if (((a ^ b ^ r) & 0x10u)) f |= AF;
@@ -143,7 +145,7 @@ static void add_flags(VeCPU *c, uint32_t a, uint32_t b, uint32_t r) {
 static void sub_flags(VeCPU *c, uint32_t a, uint32_t b, uint32_t r) {
     uint32_t f = pf_of(r);
     if (r == 0) f |= ZF;
-    f |= r & SF;
+    f |= (r >> 24) & SF;
     if (a < b) f |= CF;
     if (((a ^ b) & (a ^ r) & 0x80000000u)) f |= OF;
     if (((a ^ b ^ r) & 0x10u)) f |= AF;
@@ -152,25 +154,25 @@ static void sub_flags(VeCPU *c, uint32_t a, uint32_t b, uint32_t r) {
 static void logic_flags(VeCPU *c, uint32_t r) {
     uint32_t f = pf_of(r);
     if (r == 0) f |= ZF;
-    f |= r & SF;
+    f |= (r >> 24) & SF;
     c->flags = (c->flags & ~(CF | PF | AF | ZF | SF | OF)) | f;
 }
 static void inc_flags(VeCPU *c, uint32_t a, uint32_t r) {
     uint32_t keep = c->flags & CF;
     uint32_t f = pf_of(r);
     if (r == 0) f |= ZF;
-    f |= r & SF;
+    f |= (r >> 24) & SF;
     if ((r == 0x80000000u && a == 0x7FFFFFFFu)) f |= OF;
-    if (((a ^ 1 ^ r) & 0x10u)) f |= AF;
+    if ((a & 0xF) == 0xF) f |= AF;   /* inc: 低半字节满 → 进位 */
     c->flags = (c->flags & ~(PF | AF | ZF | SF | OF)) | f | keep;
 }
 static void dec_flags(VeCPU *c, uint32_t a, uint32_t r) {
     uint32_t keep = c->flags & CF;
     uint32_t f = pf_of(r);
     if (r == 0) f |= ZF;
-    f |= r & SF;
+    f |= (r >> 24) & SF;
     if (a == 0x80000000u && r == 0x7FFFFFFFu) f |= OF;
-    if (((a ^ 0xFFFFFFFFu ^ r) & 0x10u)) f |= AF;
+    if ((a & 0xF) == 0) f |= AF;     /* dec: 低半字节空 → 借位 */
     c->flags = (c->flags & ~(PF | AF | ZF | SF | OF)) | f | keep;
 }
 static uint8_t shl_flags_res(VeCPU *c, uint32_t v, int n, uint32_t *out) {
@@ -290,6 +292,29 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
         if (++budget > 3000000000u) {   /* ~15s @200MIPS: 防死循环 */
             ve_log("指令预算耗尽 eip=0x%08x esp=0x%08x", c->eip, c->reg[4]);
             return 4;
+        }
+        if (c->eip == 0x240134ebu) {
+            extern int ve_ctor_trace;
+            extern uint32_t g_watch_addr;
+            if (ve_ctor_trace) ve_log("ctor@134eb 入口 ecx=0x%08x", c->reg[1]);
+        }
+        {   /* 观察点: ctor 的 this 槽 [ebp-0x64] 何时被清零 */
+            extern uint32_t g_watch_addr;
+            if (c->eip == 0x240134f5u) g_watch_addr = c->reg[5] - 0x64;
+            if (c->eip == 0x24013500u || c->eip == 0x24013505u ||
+                c->eip == 0x240128c6u || c->eip == 0x24012929u ||
+                c->eip == 0x24012930u || c->eip == 0x24012931u)
+                ve_log("PROBE eip=0x%08x ebp=0x%08x esp=0x%08x [ebp]=0x%08x",
+                       c->eip, c->reg[5], c->reg[4], M32(c->reg[5]));
+            if (g_watch_addr) {
+                static uint32_t last_v = 0xDEADBEEF;
+                uint32_t v = M32(g_watch_addr);
+                if (v != last_v) {
+                    ve_log("WATCH [0x%08x] 0x%08x → 0x%08x @eip=0x%08x ebp=0x%08x",
+                           g_watch_addr, last_v, v, c->eip, c->reg[5]);
+                    last_v = v;
+                }
+            }
         }
         if ((c->eip & 0x03FFFFFFu) == 0 && c->eip >= 0x10000000u && c->eip < 0x28000000u) {
             ve_log("!! eip=模块基址 0x%08x (调用/返回错位) esp=0x%08x [esp]=0x%08x [esp+4]=0x%08x",
@@ -1033,7 +1058,11 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
                 if (target >= THUNK_BASE && target < THUNK_END) {
                     /* 尾调用语义: 弹出跳转函数自身的返回地址 → 跑垫片 → 回到其调用者 */
                     int idx = (int)((target - THUNK_BASE) / 8);
+                    extern int ve_shim_name(int idx, char *buf, int cap);
+                    char nm[160];
+                    ve_shim_name(idx, nm, sizeof(nm));
                     uint32_t tail_ret = M32(c->reg[ESP]);
+                    ve_log("TAILCALL %s tail_ret=0x%08x (ebp=0x%08x esp=0x%08x)", nm, tail_ret, c->reg[5], c->reg[4]);
                     c->reg[ESP] += 4;
                     int popn = ve_shim_dispatch(idx, c);
                     c->reg[ESP] += popn;

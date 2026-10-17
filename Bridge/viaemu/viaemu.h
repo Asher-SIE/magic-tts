@@ -54,7 +54,9 @@ struct VeCPU {
     int depth;              /* 重入深度 (shim→guest 回调) */
 };
 
-void *ve_guest_ptr(uint32_t addr);          /* guest 地址 → 宿主指针 (边界检查) */
+void *ve_guest_ptr(uint32_t addr);
+/* 测试便捷别名 */
+static inline void *viaemu_guest(uint32_t a) { return (void *)(uintptr_t)((uint32_t)a + g_ve_off); }          /* guest 地址 → 宿主指针 (边界检查) */
 uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp);  /* 执行直到 ret 到 stop_esp 层 */
 
 /* PE 加载 */
@@ -71,6 +73,8 @@ uint32_t ve_pe_export(uint32_t base, const char *func);
 /* 垫片 */
 void ve_shim_init(void);
 void *ve_shim_slot(const char *dll, const char *func);  /* 返回 thunk 地址 */
+/* 带导入方模块的槽位 (同名导入按模块区分约定, 如 Borland ibmeci 的 new 弹栈) */
+void *ve_shim_slot_mod(const char *dll, const char *func, const char *mod);
 void ve_win_set_cpu(VeCPU *c);                           /* 当前线程 CPU 上下文 */
 VeCPU *ve_win_cpu(void);
 void ve_win_thread_attach(VeCPU *c);

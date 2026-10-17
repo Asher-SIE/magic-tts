@@ -122,7 +122,7 @@ uint32_t ve_pe_load(const char *path, uint32_t want_base, const char *name) {
                     uint32_t ho = rva2off(v, secmap, nsec);
                     for (int i = 0; i < 127 && d[ho + 2 + i]; i++) fname[i] = d[ho + 2 + i];
                 }
-                void *slot = ve_shim_slot(dll, fname);
+                void *slot = ve_shim_slot_mod(dll, fname, name);
                 uint32_t *iat_entry = (uint32_t *)(img + iat + idx * 4);
                 if (slot) {
                     *iat_entry = (uint32_t)(uintptr_t)slot;
