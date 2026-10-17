@@ -156,6 +156,12 @@ int viaemu_load(const char *dir) {
         return -3;
     }
     g_loaded = 1;
+    /* 重定位抽查: ibmeci+0x12913 处内联 vtable 立即数应为 new_base+0x26528 */
+    {
+        uint32_t v = *(uint32_t *)GADDR(0x24000000u + 0x12913u);
+        ve_log("reloc 抽查 [0x240012913] = 0x%08x (期望 0x24026528; 若为 0x10026528 则代码立即数未重定位)",
+               v);
+    }
     ve_pe_iat_check();
     ve_log("viaemu 就绪 (eciNew@0x%08x)", f_eciNew);
     return 0;

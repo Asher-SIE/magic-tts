@@ -749,7 +749,10 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
             SET_RM32(m, r);
             break;
         }
-        case 0xC2: { uint16_t n = fetch16(c); uint32_t ret_eip = c->eip - 3; c->eip = pop32(c); c->reg[ESP] += n;
+        case 0xC2: { uint16_t n = fetch16(c); uint32_t ret_eip = c->eip - 3;
+                     if (ret_eip >= 0x240128bcu && ret_eip < 0x24012940u)
+                         ve_log("RETn出口 @0x%08x ebp=0x%08x esp=0x%08x →0x%08x", ret_eip, c->reg[5], c->reg[4], M32(c->reg[4]));
+                     c->eip = pop32(c); c->reg[ESP] += n;
                      if (c->eip == STOP_EIP) return 0;
                      if ((c->eip < 0x10000000u || c->eip >= 0x28000000u)
                          && !(c->eip >= THUNK_BASE && c->eip < THUNK_END)) {
@@ -758,7 +761,10 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
                          return 7;
                      }
                      break; }
-        case 0xC3: { c->eip = pop32(c); if (c->eip == STOP_EIP) return 0;
+        case 0xC3: {
+                     if (c->eip >= 0x240128bcu && c->eip < 0x24012940u)
+                         ve_log("RET出口 @0x%08x ebp=0x%08x esp=0x%08x →0x%08x", c->eip - 1, c->reg[5], c->reg[4], M32(c->reg[4]));
+                     c->eip = pop32(c); if (c->eip == STOP_EIP) return 0;
                      if (c->eip >= THUNK_BASE && c->eip < THUNK_END)
                          ve_log("RET→thunk 0x%08x (push+ret 蹦床?) [esp]=0x%08x", c->eip, M32(c->reg[4]));
                      else if (c->eip < 0x10000000u || c->eip >= 0x28000000u) {
