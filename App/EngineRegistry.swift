@@ -83,24 +83,70 @@ enum EngineRegistry {
         AVSpeechSynthesisProviderVoice.updateSpeechVoices()
     }
 
-    /// 试听: 用系统合成器以我们的语音完整 identifier 朗读.
-    /// 语音未注册时直接不发声 (发 nil voice 会静默回退系统默认语音, 反而误导).
+    /// 试听: 直接走 C 桥合成 + AVAudioPlayer 播放 — 不依赖系统注册状态
+    /// (2026-10-17: 系统语音注册管道在反复重装后可能僵死, 注销重登才恢复;
+    ///  试听是自家 UI, 没理由绕系统).
     static func preview(_ voice: VoiceRow, text: String = "语音测试，一二三。") {
-        guard let voiceId = voice.systemVoiceId,
-              let v = AVSpeechSynthesisVoice(identifier: voiceId) else {
-            NSLog("[MagicTTS] 试听取消: %@ 未注册到系统 (先点「刷新语音列表」)", voice.identifier)
+        var sr: Int32 = 24000
+        guard let st = mtts_stream_start(voice.engineKey, voice.key,
+                                         text, 100, 50, &sr) else {
+            NSLog("[MagicTTS] 试听取消: 引擎合成失败 (%@)", voice.identifier)
             return
         }
-        let synth = AVSpeechSynthesizer()
-        let u = AVSpeechUtterance(string: text)
-        u.voice = v
-        u.rate = 0.5
-        synth.speak(u)
-        PreviewHolder.retain(synth)
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { mtts_stream_free(st) }
+            var samples: [Int16] = []
+            samples.reserveCapacity(48000)
+            let chunk = 4096
+            var buf = [Int16](repeating: 0, count: chunk)
+            while samples.count < 48000 * 30 {
+                var done: Int32 = 0
+                let got = mtts_stream_read(st, &buf, Int32(chunk), &done)
+                if got > 0 { samples.append(contentsOf: buf[0..<Int(got)]) }
+                if done != 0 { break }
+            }
+            guard samples.count > 0 else { return }
+            let fmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                    sampleRate: Double(sr),
+                                    channels: 1, interleaved: false)!
+            guard let pb = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(samples.count)) else { return }
+            pb.frameLength = AVAudioFrameCount(samples.count)
+            let ch = pb.floatChannelData![0]
+            for i in 0..<samples.count { ch[i] = Float(samples[i]) / 32768.0 }
+            do {
+                let player = try AVAudioPlayer(contentsOf: PreviewHolder.writeWav(samples, rate: sr))
+                player.volume = 1.0
+                player.play()
+                PreviewHolder.retain(player)
+            } catch {
+                NSLog("[MagicTTS] 试听播放失败: %@", error.localizedDescription)
+            }
+        }
     }
 
     private enum PreviewHolder {
-        nonisolated(unsafe) static var alive: [AVSpeechSynthesizer] = []
-        static func retain(_ s: AVSpeechSynthesizer) { alive.append(s) }
+        nonisolated(unsafe) static var alive: [AVAudioPlayer] = []
+        static func retain(_ p: AVAudioPlayer) { alive.append(p); trim() }
+        static func trim() {
+            if alive.count > 4 { alive.removeFirst(alive.count - 4) }
+        }
+        static func writeWav(_ samples: [Int16], rate: Int32) -> URL {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("mtts_preview.wav")
+            var data = Data()
+            func le16(_ v: Int16) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+            func le32(_ v: Int32) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+            let n = Int32(samples.count)
+            data.append(contentsOf: [UInt8]("RIFF".utf8)); data.append(le32(36 + n * 2))
+            data.append(contentsOf: [UInt8]("WAVE".utf8))
+            data.append(contentsOf: [UInt8]("fmt ".utf8)); data.append(le32(16))
+            data.append(le16(1)); data.append(le16(1))
+            data.append(le32(rate)); data.append(le32(rate * 2))
+            data.append(le16(2)); data.append(le16(16))
+            data.append(contentsOf: [UInt8]("data".utf8)); data.append(le32(n * 2))
+            samples.withUnsafeBytes { data.append(contentsOf: $0) }
+            try? data.write(to: url)
+            return url
+        }
     }
 }
