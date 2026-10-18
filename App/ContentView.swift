@@ -180,19 +180,19 @@ struct SchemeEditor: View {
                 Text("语速 \(side.wrappedValue.rate)%")
                 Slider(value: Binding(
                     get: { Double(side.wrappedValue.rate) },
-                    set: { side.wrappedValue.rate = Int($0) }), in: 20...500, step: 5)
+                    set: { side.wrappedValue.rate = Int($0) }), in: 20...500, step: 1)
             }
             HStack {
                 Text("音高 \(side.wrappedValue.pitch)")
                 Slider(value: Binding(
                     get: { Double(side.wrappedValue.pitch) },
-                    set: { side.wrappedValue.pitch = Int($0) }), in: 0...100)
+                    set: { side.wrappedValue.pitch = Int($0) }), in: 0...100, step: 1)
             }
             HStack {
                 Text("音量 \(side.wrappedValue.volume)%")
                 Slider(value: Binding(
                     get: { Double(side.wrappedValue.volume) },
-                    set: { side.wrappedValue.volume = Int($0) }), in: 0...200, step: 5)
+                    set: { side.wrappedValue.volume = Int($0) }), in: 0...200, step: 1)
             }
         }
     }

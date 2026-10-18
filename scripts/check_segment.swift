@@ -50,7 +50,7 @@ enum CheckSegmentMain {
         expect("小写不受处理", s5 == [TextSegment(text: "字母 z 分组", target: .primary)],
                "\(s5)")
 
-        // 6. 孤立字母归副侧时不处理 (英文发音人按字母名朗读)
+        // 6. 孤立字母归副侧时前缀不生效 (措辞与语言绑定, 仅主侧)
         opt.letterCase = .prefixZh
         opt.isolatedLetterToPrimary = false
         let s6 = TextSegmenter.segment("字母 Z 分组", options: opt)
@@ -58,6 +58,13 @@ enum CheckSegmentMain {
                s6.count == 3 && s6[1] == TextSegment(text: "Z ", target: .secondary)
                && !s6[1].isolatedCapital,
                "\(s6)")
+
+        // 6b. 音高变体不分侧: 字母归副侧也打标
+        opt.letterCase = .pitch
+        let s6b = TextSegmenter.segment("字母 Z 分组", options: opt)
+        expect("音高副侧也生效",
+               s6b.count == 3 && s6b[1] == TextSegment(text: "Z", target: .secondary, isolatedCapital: true),
+               "\(s6b)")
 
         // 7. 多字母词不算孤立字母
         opt.isolatedLetterToPrimary = true

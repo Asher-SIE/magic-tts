@@ -9,13 +9,13 @@ enum SegmentTarget {
 
 // MARK: - 规则参数 (随 scheme.json 持久化)
 
-/// 大小写字母处理 — 仅作用于"孤立的单个大写字母"且读给主侧时
-/// (副侧英文发音人本就按字母名朗读, 无需辅助)。
+/// 大小写字母处理 — 作用于"孤立的单个大写字母":
+/// 音高变体不分侧 (读给哪侧就在哪侧变调); 前缀变体与语言绑定, 仅主侧朗读时改写。
 enum LetterCaseStyle: String, Codable {
     case none       // 原样朗读
-    case prefixZh   // 前缀 "大写": Z → "大写 Z"
-    case prefixEn   // 前缀 "Capital": Z → "Capital Z"
-    case pitch      // 提高音高 (段带 isolatedCapital 标, 渲染级音高增量)
+    case prefixZh   // 前缀 "大写": Z → "大写 Z" (仅主侧)
+    case prefixEn   // 前缀 "Capital": Z → "Capital Z" (仅主侧)
+    case pitch      // 提高音高 (段带 isolatedCapital 标, 渲染级音高增量, 不分侧)
 
     /// pitch 变体的音高增量 (桥刻度 0...100, 50 = 常音高)
     static let pitchDelta = 15
@@ -201,19 +201,22 @@ enum TextSegmenter {
                 targets[k] = (prev == .secondary && next == .secondary) ? .secondary : .primary
             }
         }
-        /* 大小写字母处理: 孤立的单个大写字母 (ASCII A-Z) 读给主侧时生效;
-         * 前缀变体直接改写文本 (可照常与邻段合并), 音高变体只打标 */
+        /* 大小写字母处理: 孤立的单个大写字母 (ASCII A-Z) 时生效 —
+         * 音高变体不分侧 (读给哪侧就在哪侧变调, VoiceOver 式资本提示);
+         * 前缀变体与措辞语言绑定, 仅主侧朗读时改写文本 */
         return items.enumerated().map { i, item -> Routed in
             var text = item.text
             var cap = false
-            if targets[i] == .primary, item.cls == .latin,
-               item.latinWords == 1, item.text.unicodeScalars.count == 1,
+            if item.cls == .latin, item.latinWords == 1, item.text.unicodeScalars.count == 1,
                let ch = item.text.unicodeScalars.first, (0x41...0x5A).contains(ch.value) {
-                switch options.letterCase {
-                case .none: break
-                case .prefixZh: text = "大写 " + text
-                case .prefixEn: text = "Capital " + text
-                case .pitch: cap = true
+                if options.letterCase == .pitch {
+                    cap = true
+                } else if targets[i] == .primary {
+                    switch options.letterCase {
+                    case .none, .pitch: break
+                    case .prefixZh: text = "大写 " + text
+                    case .prefixEn: text = "Capital " + text
+                    }
                 }
             }
             return Routed(text: text, cls: item.cls, target: targets[i], isolatedCapital: cap)
