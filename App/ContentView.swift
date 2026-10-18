@@ -145,6 +145,7 @@ struct SchemeEditor: View {
                 if scheme.useSecondary {
                     Section("分发规则") {
                         Toggle("孤立字母归中文侧 (如 “Z 分组”)", isOn: $scheme.rules.isolatedLetterToPrimary)
+                        Toggle("混排字母串逐字母拼读 (如 ABCabc)", isOn: $scheme.rules.spellMixedRuns)
                         Toggle("数字归中文侧", isOn: $scheme.rules.digitsToPrimary)
                         Stepper("英文最少词数: \(scheme.rules.englishMinWords)",
                                 value: $scheme.rules.englishMinWords, in: 1...3)

@@ -9,13 +9,13 @@ enum SegmentTarget {
 
 // MARK: - 规则参数 (随 scheme.json 持久化)
 
-/// 大小写字母处理 — 作用于"孤立的单个大写字母":
-/// 音高变体不分侧 (读给哪侧就在哪侧变调); 前缀变体与语言绑定, 仅主侧朗读时改写。
+/// 大小写字母处理 — 作用于"孤立的单个大写字母" (含拼读拆出的字母):
+/// 不分侧, 字母读给哪侧就在哪侧处理; 前缀措辞按该侧语言由用户选择。
 enum LetterCaseStyle: String, Codable {
     case none       // 原样朗读
-    case prefixZh   // 前缀 "大写": Z → "大写 Z" (仅主侧)
-    case prefixEn   // 前缀 "Capital": Z → "Capital Z" (仅主侧)
-    case pitch      // 提高音高 (段带 isolatedCapital 标, 渲染级音高增量, 不分侧)
+    case prefixZh   // 前缀 "大写": Z → "大写 Z" (主侧中文引擎)
+    case prefixEn   // 前缀 "Capital": Z → "Capital Z" (副侧英文引擎)
+    case pitch      // 提高音高 (段带 isolatedCapital 标, 渲染级音高增量)
 
     /// pitch 变体的音高增量 (桥刻度 0...100, 50 = 常音高)
     static let pitchDelta = 15
@@ -26,21 +26,25 @@ enum LetterCaseStyle: String, Codable {
 struct SegmentRuleOptions: Codable, Equatable {
     /// 连续英文至少几个词才交给副发音人 (1 = 所有英文短语都切给英文侧)
     var englishMinWords: Int = 1
-    /// 孤立单字母 (如 "Z 分组" 的 Z) 交给主发音人, 避免英文音色拼读突兀
-    var isolatedLetterToPrimary: Bool = true
+    /// 孤立单字母交给哪侧: false = 第二引擎 (英文按字母名朗读, 默认),
+    /// true = 主发音人 (避免英文音色拼读突兀)
+    var isolatedLetterToPrimary: Bool = false
     /// 数字一律交给主发音人; false = 左右都被英文夹住时归副发音人
     var digitsToPrimary: Bool = true
-    /// 孤立大写字母读给主侧时的辅助方式 (见 LetterCaseStyle)
+    /// 孤立大写字母读时的辅助方式 (见 LetterCaseStyle; 措辞按字母朗读侧语言选)
     var letterCase: LetterCaseStyle = .none
+    /// 大写块+小写混排的非词形串 (ABCabc) 逐字母拼读, 大小写处理随之逐字母生效
+    var spellMixedRuns: Bool = true
 
     // 自定义解码: 手改 scheme.json 缺字段时回退默认值, 不整体报废
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         englishMinWords = try c.decodeIfPresent(Int.self, forKey: .englishMinWords) ?? 1
-        isolatedLetterToPrimary = try c.decodeIfPresent(Bool.self, forKey: .isolatedLetterToPrimary) ?? true
+        isolatedLetterToPrimary = try c.decodeIfPresent(Bool.self, forKey: .isolatedLetterToPrimary) ?? false
         digitsToPrimary = try c.decodeIfPresent(Bool.self, forKey: .digitsToPrimary) ?? true
         letterCase = try c.decodeIfPresent(LetterCaseStyle.self, forKey: .letterCase) ?? .none
+        spellMixedRuns = try c.decodeIfPresent(Bool.self, forKey: .spellMixedRuns) ?? true
     }
 }
 
@@ -143,6 +147,27 @@ enum TextSegmenter {
         let latinWords: Int
     }
 
+    /// 拼读判定: 存在"≥2 连续大写、其后还有小写"的块 (ABCabc ✓ 拆)。
+    /// 驼峰 (iPhone/GitHub)、全大写缩写 (NVDA)、词尾大写 (macOS) 等词形不拆。
+    static func isSpellRun(_ s: String) -> Bool {
+        let sc = Array(s.unicodeScalars)
+        func isU(_ c: UnicodeScalar) -> Bool { (0x41...0x5A).contains(c.value) }
+        func isL(_ c: UnicodeScalar) -> Bool { (0x61...0x7A).contains(c.value) }
+        guard sc.contains(where: isU), sc.contains(where: isL) else { return false }
+        var i = 0
+        while i < sc.count {
+            if isU(sc[i]) {
+                var j = i
+                while j < sc.count && isU(sc[j]) { j += 1 }
+                if j - i >= 2, sc[j...].contains(where: isL) { return true }
+                i = j
+            } else {
+                i += 1
+            }
+        }
+        return false
+    }
+
     static func route(_ runs: [Run], options: SegmentRuleOptions) -> [Routed] {
         var items: [Item] = []
         var i = 0
@@ -173,6 +198,31 @@ enum TextSegmenter {
             i = j
         }
 
+        /* 字母串拼读: 混排串拆成逐字母 item (字母间补空格), 走同一条
+         * 孤立字母链 → 大小写处理逐字母生效; 词形不拆 (见 isSpellRun) */
+        if options.spellMixedRuns {
+            var expanded: [Item] = []
+            for it in items {
+                if it.cls == .latin && isSpellRun(it.text) {
+                    var prevLetter = false
+                    for ch in it.text {
+                        if let c = ch.unicodeScalars.first,
+                           (0x41...0x5A).contains(c.value) || (0x61...0x7A).contains(c.value) {
+                            if prevLetter { expanded.append(Item(text: " ", cls: .neutral, latinWords: 0)) }
+                            expanded.append(Item(text: String(ch), cls: .latin, latinWords: 1))
+                            prevLetter = true
+                        } else {
+                            expanded.append(Item(text: String(ch), cls: .neutral, latinWords: 0))
+                            prevLetter = false
+                        }
+                    }
+                } else {
+                    expanded.append(it)
+                }
+            }
+            items = expanded
+        }
+
         // 第一轮: CJK/拉丁定侧 (不依赖邻居)
         var targets: [SegmentTarget?] = Array(repeating: nil, count: items.count)
         for k in items.indices {
@@ -201,22 +251,18 @@ enum TextSegmenter {
                 targets[k] = (prev == .secondary && next == .secondary) ? .secondary : .primary
             }
         }
-        /* 大小写字母处理: 孤立的单个大写字母 (ASCII A-Z) 时生效 —
-         * 音高变体不分侧 (读给哪侧就在哪侧变调, VoiceOver 式资本提示);
-         * 前缀变体与措辞语言绑定, 仅主侧朗读时改写文本 */
+        /* 大小写字母处理: 孤立的单个大写字母 (ASCII A-Z, 含拼读拆出的) —
+         * 不分侧, 字母读给哪侧就在哪侧处理; 前缀措辞由用户按该侧语言选择 */
         return items.enumerated().map { i, item -> Routed in
             var text = item.text
             var cap = false
             if item.cls == .latin, item.latinWords == 1, item.text.unicodeScalars.count == 1,
                let ch = item.text.unicodeScalars.first, (0x41...0x5A).contains(ch.value) {
-                if options.letterCase == .pitch {
-                    cap = true
-                } else if targets[i] == .primary {
-                    switch options.letterCase {
-                    case .none, .pitch: break
-                    case .prefixZh: text = "大写 " + text
-                    case .prefixEn: text = "Capital " + text
-                    }
+                switch options.letterCase {
+                case .none: break
+                case .prefixZh: text = "大写 " + text
+                case .prefixEn: text = "Capital " + text
+                case .pitch: cap = true
                 }
             }
             return Routed(text: text, cls: item.cls, target: targets[i], isolatedCapital: cap)
