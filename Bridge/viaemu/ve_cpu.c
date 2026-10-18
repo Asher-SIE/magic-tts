@@ -133,6 +133,30 @@ static ModRM modrm(VeCPU *c, int osize) {
 #define SET_RM8(m, v) do { if (m.ea) WR8(m.ea, v); else c->reg[m.rm & 3] = (c->reg[m.rm & 3] & 0xFFFFFF00u) | ((v) & 0xFF); } while (0)
 
 /* ---- 标志算术 ---- */
+static void add_flags_sz(VeCPU *c, uint32_t a, uint32_t b, uint32_t r, int asz) {
+    uint32_t m = asz == 8 ? 0xFFu : asz == 16 ? 0xFFFFu : 0xFFFFFFFFu;
+    uint32_t sign = asz == 8 ? 0x80u : asz == 16 ? 0x8000u : 0x80000000u;
+    uint32_t f = pf_of(r);
+    a &= m; b &= m; r &= m;
+    if (r == 0) f |= ZF;
+    if (r & sign) f |= SF;
+    if (r < a) f |= CF;
+    if ((~(a ^ b) & (a ^ r) & sign)) f |= OF;
+    if (((a ^ b ^ r) & 0x10u)) f |= AF;
+    c->flags = (c->flags & ~(CF | PF | AF | ZF | SF | OF)) | f;
+}
+static void sub_flags_sz(VeCPU *c, uint32_t a, uint32_t b, uint32_t r, int asz) {
+    uint32_t m = asz == 8 ? 0xFFu : asz == 16 ? 0xFFFFu : 0xFFFFFFFFu;
+    uint32_t sign = asz == 8 ? 0x80u : asz == 16 ? 0x8000u : 0x80000000u;
+    uint32_t f = pf_of(r);
+    a &= m; b &= m; r &= m;
+    if (r == 0) f |= ZF;
+    if (r & sign) f |= SF;
+    if (a < b) f |= CF;
+    if (((a ^ b) & (a ^ r) & sign)) f |= OF;
+    if (((a ^ b ^ r) & 0x10u)) f |= AF;
+    c->flags = (c->flags & ~(CF | PF | AF | ZF | SF | OF)) | f;
+}
 static void add_flags(VeCPU *c, uint32_t a, uint32_t b, uint32_t r) {
     uint32_t f = pf_of(r);
     if (r == 0) f |= ZF;
@@ -221,7 +245,7 @@ static inline int cond(VeCPU *c, int cc) {
     case 4: return (f & SF) != 0;
     case 5: return (f & PF) != 0;
     case 6: return ((f & SF) != 0) != ((f & OF) != 0);
-    case 7: return ((f & SF) != 0) == ((f & OF) != 0);
+    case 7: return (f & ZF) != 0 || (((f & SF) != 0) != ((f & OF) != 0));   /* LE = ZF || L */
     }
     return 0;
 }
@@ -232,7 +256,7 @@ static uint32_t pop32(VeCPU *c) { uint32_t v = M32(c->reg[ESP]); c->reg[ESP] += 
 
 /* x87 读内存操作数 */
 static long double fld_m32(uint32_t a) { float f; memcpy(&f, GADDR(a), 4); return f; }
-static long double fld_m64(uint32_t a) { double f; memcpy(&f, (uint8_t *)(uintptr_t)a, 8); return f; }
+static long double fld_m64(uint32_t a) { double f; memcpy(&f, GADDR(a), 8); return f; }
 static long double fld_m80(uint32_t a) {
     /* 80-bit 扩展精度 → host long double (arm64: IEEE quad) */
     uint16_t se; uint64_t m;
@@ -266,8 +290,8 @@ static void fstp_m80(uint32_t a, long double v) {
 }
 
 /* M64REF helper (避免前向宏问题) */
-static inline uint64_t M64R(uint32_t a) { uint64_t v; memcpy(&v, (uint8_t *)(uintptr_t)a, 8); return v; }
-static inline void WM64(uint32_t a, uint64_t v) { memcpy((uint8_t *)(uintptr_t)a, &v, 8); }
+static inline uint64_t M64R(uint32_t a) { uint64_t v; memcpy(&v, GADDR(a), 8); return v; }
+static inline void WM64(uint32_t a, uint64_t v) { memcpy(GADDR(a), &v, 8); }
 #define M64REF(a) M64R(a)
 
 /* 除零等异常 → SEH */
@@ -286,11 +310,17 @@ void ve_raise_fault(VeCPU *c, int code, uint32_t addr);
 uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
     (void)stop_esp;
     uint64_t budget = 0;
+    /* 指令预算 (十亿条): 默认 20G, VE_BUDGET 可调; 引擎全量初始化实测 >3G */
+    static uint64_t cap = 0;
+    if (!cap) {
+        const char *e = getenv("VE_BUDGET");
+        cap = (e && atoi(e) > 0) ? (uint64_t)atoi(e) * 1000000000ull : 20000000000ull;
+    }
     static int trace = -1;
     if (trace < 0) trace = getenv("VE_TRACE") ? 1 : 0;
     for (;;) {
-        if (++budget > 3000000000u) {   /* ~15s @200MIPS: 防死循环 */
-            ve_log("指令预算耗尽 eip=0x%08x esp=0x%08x", c->eip, c->reg[4]);
+        if (++budget > cap) {   /* 防死循环 */
+            ve_log("指令预算耗尽(%lluG) eip=0x%08x esp=0x%08x", (unsigned long long)(cap / 1000000000ull), c->eip, c->reg[4]);
             return 4;
         }
         if (c->eip == 0x240134ebu) {
@@ -298,14 +328,115 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
             extern uint32_t g_watch_addr;
             if (ve_ctor_trace) ve_log("ctor@134eb 入口 ecx=0x%08x", c->reg[1]);
         }
-        {   /* 观察点: ctor 的 this 槽 [ebp-0x64] 何时被清零 */
+        {   /* 观察点: 基类 ctor 保存 ebp 的槽 [S] 何时被改写 */
             extern uint32_t g_watch_addr;
-            if (c->eip == 0x240134f5u) g_watch_addr = c->reg[5] - 0x64;
+            if (c->eip == 0x240128c6u) g_watch_addr = c->reg[5];   /* [S]=保存的外层 ebp */
+            if (c->eip == 0x2400fc6du) {   /* 音素循环 sscanf 返回点: 看对象/索引 */
+                uint32_t obj = M32(c->reg[5] - 0x4c);
+                ve_log("PHN-LOOP @fc6d ebp=0x%08x [ebp-0x4c]=0x%08x idx16=%u eax=%u",
+                       c->reg[5], obj, (obj > 0x400000u && obj < 0x3F800000u) ? M16(obj + 0xe) : 0xFFFF, c->reg[0]);
+            }
+            if (c->eip == 0x2400dab9u) {   /* d8b7 的 -14 返回点 */
+                ve_log("D8B7-FAIL-RET this+0x54=0x%08x", M32(M32(c->reg[5] - 0x58) + 0x54));
+            }
+            if (c->eip == 0x2400daa2u) {   /* [this+0x54] 判空处 */
+                uint32_t t = M32(c->reg[5] - 0x58);
+                ve_log("D8B7-CHK this=0x%08x [+0x54]=0x%08x", t, M32(t + 0x54));
+            }
+            if (c->eip == 0x2400d947u) {   /* 0x1001fd70 返回判定 */
+                ve_log("D8B7-A ret=0x%08x", M32(c->reg[5] - 0x10));
+            }
+            if (c->eip == 0x2400d95cu) {   /* 0x1001fd80 返回判定 */
+                uint32_t s = M32(c->reg[5] - 0x24);
+                ve_log("D8B7-B str=0x%08x \"%s\"", s,
+                       (s > 0x400000u && s < 0x3F800000u) ? (char *)GADDR(s) : "?");
+            }
+            if (c->eip == 0x2400d08eu) {   /* [obj+0xB6] = [engine+0x12B] */
+                uint32_t eng = M32(c->reg[5] - 0x1c);
+                ve_log("ERRSRC-A eng+0x12B=%d (0x%08x)", (int32_t)c->reg[1], c->reg[1]);
+                (void)eng;
+            }
+            if (c->eip == 0x2400d0b2u) {   /* 0x1000d8b7 返回后 */
+                ve_log("ERRSRC-B d8b7_ret=%d (0x%08x)", (int32_t)c->reg[0], c->reg[0]);
+            }
+            if (c->eip == 0x2400bdf4u) {   /* new(0xBA) 返回: 观察 [obj+0xB6] 错误码写入者 */
+                uint32_t obj = M32(c->reg[5] - 0xc);
+                if (obj > 0x400000u && obj < 0x3F800000u) {
+                    g_watch_addr = obj + 0xB6;
+                    ve_log("ENGOBJ-ALLOC obj=0x%08x", obj);
+                }
+            }
+            if (c->eip == 0x2400be3bu) {   /* [obj+0xB6] 错误码判定处 */
+                uint32_t h = M32(c->reg[5] + 8);
+                uint32_t obj = (h > 0x400000u && h < 0x3F800000u) ? M32(h) : 0;
+                ve_log("ENGOBJ-ERR obj=0x%08x [obj+0xB6]=%d (0x%08x)",
+                       obj, (int32_t)M32(c->reg[5] - 4), M32(c->reg[5] - 4));
+            }
+            if (c->eip == 0x1c176cc0u) {   /* chs50.voice-setup 入口: 看实参 */
+                ve_log("VS-ENTRY esp=0x%08x a1=0x%08x a2=0x%08x a3=0x%08x a4=0x%08x",
+                       c->reg[4], M32(c->reg[4] + 4), M32(c->reg[4] + 8),
+                       M32(c->reg[4] + 0xc), M32(c->reg[4] + 0x10));
+            }
+            if (c->eip == 0x1c176cddu) {   /* jle 处: 看 eax 与标志 */
+                ve_log("VS-JLE eax=0x%08x flags=0x%04x (ZF=%u SF=%u OF=%u)",
+                       c->reg[0], c->flags, (c->flags & 0x40) != 0,
+                       (c->flags & 0x80) != 0, (c->flags & 0x800) != 0);
+            }
+            {   /* 音素装载函数 (0x1000faa9) 出入口 */
+                static int s_ln2 = 0;
+                uint32_t k = c->eip;
+                const char *tag = NULL;
+                if (k == 0x2400faa9u) tag = "LOAD入口";
+                else if (k == 0x2400fce4u) tag = "查询落空→收尾";
+                else if (k == 0x2400fb38u) tag = "容量失败→错误";
+                else if (k == 0x2400fd29u) tag = "LOAD-ret";
+                if (tag && s_ln2 < 60) {
+                    s_ln2++;
+                    uint32_t obj = M32(c->reg[5] - 0x4c);
+                    ve_log("PHN-LOAD %-12s eax=%u ecx=0x%08x obj=0x%08x idx=%u",
+                           tag, c->reg[0], c->reg[1], obj,
+                           (obj > 0x400000u && obj < 0x3F800000u) ? M16(obj + 0xe) : 0xFFFF);
+                }
+            }
+            {   /* 音素循环全链路: 顶/容量分支/idx块/回边 (限 40 条) */
+                static int s_ln = 0;
+                uint32_t k = c->eip;
+                const char *tag = NULL;
+                if (k == 0x2400fb0cu) tag = "循环顶";
+                else if (k == 0x2400fb36u) tag = "容量OK跳过";
+                else if (k == 0x2400fca4u) tag = "jloop出口→idx块";
+                else if (k == 0x2400fcb2u) tag = "idx写回";
+                else if (k == 0x2400fcdfu) tag = "回边jmp";
+                if (tag && s_ln < 40) {
+                    s_ln++;
+                    uint32_t obj = M32(c->reg[5] - 0x4c);
+                    ve_log("PHN-FLOW %-10s ebp=0x%08x obj=0x%08x table=0x%08x idx=%u j=%u",
+                           tag, c->reg[5], obj,
+                           (obj > 0x400000u && obj < 0x3F800000u) ? M32(obj + 8) : 0,
+                           (obj > 0x400000u && obj < 0x3F800000u) ? M16(obj + 0xe) : 0xFFFF,
+                           M32(c->reg[5] - 0x40));
+                }
+            }
+            if (c->eip == 0x2400fcb2u) {   /* mov [obj+0xe],ax 写回点 */
+                uint32_t obj = M32(c->reg[5] - 0x4c);
+                if (obj > 0x400000u && obj < 0x3F800000u) {
+                    g_watch_addr = obj + 0xe;
+                    static int s_n = 0;
+                    if (s_n++ < 8) ve_log("PHN-STORE ax=%u → [0x%08x] (旧值=%u)",
+                                          c->reg[0] & 0xFFFF, obj + 0xe, M16(obj + 0xe));
+                }
+            }
             if (c->eip == 0x24013500u || c->eip == 0x24013505u ||
                 c->eip == 0x240128c6u || c->eip == 0x24012929u ||
-                c->eip == 0x24012930u || c->eip == 0x24012931u)
-                ve_log("PROBE eip=0x%08x ebp=0x%08x esp=0x%08x [ebp]=0x%08x",
-                       c->eip, c->reg[5], c->reg[4], M32(c->reg[5]));
+                c->eip == 0x24012930u || c->eip == 0x24012931u ||
+                c->eip == 0x240128d2u ||   /* 0x1fbf0 返回后 */
+                c->eip == 0x240128e1u ||   /* 0x10001609 返回后 */
+                c->eip == 0x240128f2u ||   /* 0x1fa60 #1 返回后 */
+                c->eip == 0x24012903u ||   /* 0x1fa60 #2 返回后 */
+                c->eip == 0x2401291fu ||   /* 0x1fc40 返回后 */
+                c->eip == 0x24012923u)     /* 尾段: or [ebp-4],-1 */
+                ve_log("PROBE eip=0x%08x ebp=0x%08x esp=0x%08x [ebp]=0x%08x [ebp-0x10]=0x%08x",
+                       c->eip, c->reg[5], c->reg[4], M32(c->reg[5]), M32(c->reg[5] - 0x10));
             if (g_watch_addr) {
                 static uint32_t last_v = 0xDEADBEEF;
                 uint32_t v = M32(g_watch_addr);
@@ -315,6 +446,11 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
                     last_v = v;
                 }
             }
+        }
+        if (c->eip >= 0x0EE00000u && c->eip < 0x0F000000u) {
+            ve_log("!! 哨兵区执行 eip=0x%08x esp=0x%08x [esp]=0x%08x (未实现导入/零页漫步)",
+                   c->eip, c->reg[4], M32(c->reg[4]));
+            return 7;
         }
         if ((c->eip & 0x03FFFFFFu) == 0 && c->eip >= 0x10000000u && c->eip < 0x28000000u) {
             ve_log("!! eip=模块基址 0x%08x (调用/返回错位) esp=0x%08x [esp]=0x%08x [esp+4]=0x%08x",
@@ -411,21 +547,25 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
         case 0x34: case 0x35: case 0x3C: case 0x3D: {   /* ALU al/eax, imm */
             int aluop = (op >> 3) & 7;
             int wide = op & 1;
-            uint32_t b = wide ? fetch32(c) : fetch8(c);
-            uint32_t a = wide ? c->reg[EAX] : (c->reg[EAX] & 0xFF), r = 0;
+            /* 66 前缀(osize=1): 宽操作时立即数 16 位 (2 字节), eip 只能前进 2 */
+            int asz = !wide ? 8 : (osize ? 16 : 32);
+            uint32_t b = asz == 8 ? fetch8(c) : asz == 16 ? (uint32_t)fetch16(c) : fetch32(c);
+            uint32_t mask = asz == 8 ? 0xFFu : asz == 16 ? 0xFFFFu : 0xFFFFFFFFu;
+            uint32_t a = wide ? (c->reg[EAX] & mask) : (c->reg[EAX] & 0xFF), r = 0;
             switch (aluop) {
-            case 0: r = a + b; add_flags(c, a, b, r); break;
-            case 1: r = a | b; logic_flags(c, r); break;
-            case 2: r = a + b + (c->flags & CF); add_flags(c, a + (c->flags & CF), b, r); break;
-            case 3: r = a - b - (c->flags & CF); sub_flags(c, a - (c->flags & CF), b, r); break;
-            case 4: r = a & b; logic_flags(c, r); break;
-            case 5: r = a - b; sub_flags(c, a, b, r); break;
-            case 6: r = a ^ b; logic_flags(c, r); break;
-            case 7: sub_flags(c, a, b, a - b); break;
+            case 0: r = a + b; add_flags_sz(c, a, b, r, asz); break;
+            case 1: r = a | b; logic_flags(c, r & mask); break;
+            case 2: r = a + b + (c->flags & CF); add_flags_sz(c, a + (c->flags & CF), b, r, asz); break;
+            case 3: r = a - b - (c->flags & CF); sub_flags_sz(c, a - (c->flags & CF), b, r, asz); break;
+            case 4: r = a & b; logic_flags(c, r & mask); break;
+            case 5: r = a - b; sub_flags_sz(c, a, b, r, asz); break;
+            case 6: r = a ^ b; logic_flags(c, r & mask); break;
+            case 7: sub_flags_sz(c, a, b, (a - b) & mask, asz); break;
             }
             if (aluop != 7) {
-                if (wide) c->reg[EAX] = r;
-                else c->reg[EAX] = (c->reg[EAX] & 0xFFFFFF00u) | (r & 0xFF);
+                if (asz == 8) c->reg[EAX] = (c->reg[EAX] & 0xFFFFFF00u) | (r & 0xFF);
+                else if (asz == 16) c->reg[EAX] = (c->reg[EAX] & 0xFFFF0000u) | (r & 0xFFFF);
+                else c->reg[EAX] = r;
             }
             break;
         }
@@ -624,19 +764,28 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
         case 0x81: case 0x83: {
             ModRM m = modrm(c, osize);
             int aluop = m.reg;
-            uint32_t b = (op == 0x81) ? fetch32(c) : (uint32_t)(int32_t)(int8_t)fetch8(c);
-            uint32_t a = RM32(m), r = 0;
+            int asz = osize ? 16 : 32;
+            uint32_t mask = asz == 16 ? 0xFFFFu : 0xFFFFFFFFu;
+            uint32_t b = (op == 0x81)
+                ? (asz == 16 ? (uint32_t)fetch16(c) : fetch32(c))
+                : (uint32_t)(int32_t)(int8_t)fetch8(c);
+            uint32_t a = RM32(m) & mask, r = 0;
             switch (aluop) {
-            case 0: r = a + b; add_flags(c, a, b, r); break;
-            case 1: r = a | b; logic_flags(c, r); break;
-            case 2: r = a + b + (c->flags & CF); add_flags(c, a + (c->flags & CF), b, r); break;
-            case 3: r = a - b - (c->flags & CF); sub_flags(c, a - (c->flags & CF), b, r); break;
-            case 4: r = a & b; logic_flags(c, r); break;
-            case 5: r = a - b; sub_flags(c, a, b, r); break;
-            case 6: r = a ^ b; logic_flags(c, r); break;
-            case 7: sub_flags(c, a, b, a - b); break;
+            case 0: r = a + b; add_flags_sz(c, a, b, r, asz); break;
+            case 1: r = a | b; logic_flags(c, r & mask); break;
+            case 2: r = a + b + (c->flags & CF); add_flags_sz(c, a + (c->flags & CF), b, r, asz); break;
+            case 3: r = a - b - (c->flags & CF); sub_flags_sz(c, a - (c->flags & CF), b, r, asz); break;
+            case 4: r = a & b; logic_flags(c, r & mask); break;
+            case 5: r = a - b; sub_flags_sz(c, a, b, r, asz); break;
+            case 6: r = a ^ b; logic_flags(c, r & mask); break;
+            case 7: sub_flags_sz(c, a, b, (a - b) & mask, asz); break;
             }
-            if (aluop != 7) SET_RM32(m, r);
+            if (aluop != 7) {
+                if (asz == 16) {
+                    if (m.ea) WR16(m.ea, r & 0xFFFF);
+                    else c->reg[m.rm] = (c->reg[m.rm] & 0xFFFF0000u) | (r & 0xFFFF);
+                } else SET_RM32(m, r);
+            }
             break;
         }
         case 0x84: { ModRM m = modrm(c, osize); logic_flags(c, RM8(m) & (c->reg[m.reg] & 0xFF)); break; }
@@ -723,7 +872,10 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
         }
 
         case 0xB0 ... 0xB7: c->reg[op & 7] = (c->reg[op & 7] & ~0xFFu) | fetch8(c); break;
-        case 0xB8 ... 0xBF: c->reg[op & 7] = fetch32(c); break;
+        case 0xB8 ... 0xBF:
+            if (osize) c->reg[op & 7] = (c->reg[op & 7] & 0xFFFF0000u) | fetch16(c);
+            else c->reg[op & 7] = fetch32(c);
+            break;
 
         case 0xC0: case 0xC1: {   /* shift rm, imm8 */
             ModRM m = modrm(c, osize);
@@ -890,7 +1042,7 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
                     int32_t i32 = w;
                     switch (m.reg) {
                     case 0: fpush(c, (long double)i32); break;
-                    case 2: case 3: { int32_t t = (int32_t)frndint_of(c, FST(0)); int16_t tt = (int16_t)t; memcpy((uint8_t *)(uintptr_t)a, &tt, 2); if (m.reg == 3) fpop(c); break; }
+                    case 2: case 3: { int32_t t = (int32_t)frndint_of(c, FST(0)); int16_t tt = (int16_t)t; memcpy(GADDR(a), &tt, 2); if (m.reg == 3) fpop(c); break; }
                     default: ve_log("x87 DA /%d", m.reg); return 2;
                     }
                 } else { ve_log("x87 DA reg %02x", mod); return 2; }
@@ -898,7 +1050,7 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
             case 0xDB:
                 if (is_mem) {
                     switch (m.reg) {
-                    case 0: { int32_t v; memcpy(&v, (uint8_t *)(uintptr_t)a, 4); fpush(c, v); break; }
+                    case 0: { int32_t v; memcpy(&v, GADDR(a), 4); fpush(c, v); break; }
                     case 2: case 3: { int32_t t = (int32_t)frndint_of(c, FST(0)); M32(a) = t; if (m.reg == 3) fpop(c); break; }
                     case 5: fpush(c, fld_m80(a)); break;
                     case 7: fstp_m80(a, FST(0)); fpop(c); break;
@@ -941,7 +1093,7 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
                     case 2: { double f = (double)FST(0); WM64(a, *(uint64_t *)&f); break; }
                     case 3: { double f = (double)FST(0); WM64(a, *(uint64_t *)&f); fpop(c); break; }
                     case 4: case 6: {   /* frstor/fsave: 94/108 字节 — 只恢复/保存核心 */
-                        uint8_t *p = (uint8_t *)(uintptr_t)a;
+                        uint8_t *p = (uint8_t *)GADDR(a);
                         memcpy(&c->fctrl, p + 0, 2); memcpy(&c->fstat, p + 2, 2);
                         for (int i = 0; i < 8; i++) { long double v = fld_m80(a + 28 + i * 10); c->st[(c->ftop + i) & 7] = v; }
                         if (m.reg == 6) memset(p, 0, 108);
@@ -1078,12 +1230,14 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
             case 1: { uint32_t a = RM32(m), r = a - 1; dec_flags(c, a, r); SET_RM32(m, r); break; }
             case 2: {   /* call rm32 */
                 uint32_t target = RM32(m);
+                uint32_t retpc = c->eip;          /* call 下一条 (垫片内 guest 重入会打掉 eip) */
                 push32(c, c->eip);
                 if (target >= THUNK_BASE && target < THUNK_END) {
                     int idx = (int)((target - THUNK_BASE) / 8);
                     c->reg[ESP] += 4;   /* 弹返回地址, 垫片自行处理 */
                     int pop = ve_shim_dispatch(idx, c);
                     c->reg[ESP] += pop;
+                    c->eip = retpc;     /* qsort 等重入垫片后 eip=STOP 哨兵, 必须修复 */
                 } else if (target < 0x00400000u || (target >= 0x0D000000u && target < 0x0D200000u)) {
                     /* 坏函数指针 (低地址/TEB区): 现场报告并中止, 防零页漫步 */
                     ve_log("CALL坏指针 target=0x%08x from=0x%08x | eax=0x%08x [eax]=0x%08x ecx=0x%08x edx=0x%08x esi=0x%08x edi=0x%08x ebx=0x%08x",

@@ -35,6 +35,8 @@ typedef struct ShimEnt { char dll[16]; char func[140]; char mod[16]; int borp; }
 /* borp: 导入方为 Borland 约定 (ibmeci/torrent) 的 new/delete 被调方弹栈 */
 static ShimEnt g_shims[MAX_SHIMS];
 static int g_nshims;
+int ve_shim_burst_req = 0;   /* >0: 接下来 N 个垫片调用强制打印 (诊断) */
+int ve_sscanf_trace = 0;     /* >0: 接下来 N 个 sscanf 打印输入/格式 */
 
 void *ve_shim_slot(const char *dll, const char *func) {
     return ve_shim_slot_mod(dll, func, "");
@@ -173,7 +175,7 @@ static int guest_vformat(char *out, int cap, const char *fmt, uint32_t sp) {
         switch (conv) {
         case 'd': case 'i': {
             int32_t v = *(int32_t *)GADDR(sp); sp += 4;
-            snprintf(piece, sizeof(piece), "%s%sd", spec, lng ? "l" : "");
+            snprintf(piece, sizeof(piece), "%%%s%sd", spec, lng ? "l" : "");
             if (lng) { long lv = v; n += snprintf(out + n, (size_t)(cap - n), piece, lv); }
             else n += snprintf(out + n, (size_t)(cap - n), piece, v);
             break;
@@ -181,7 +183,7 @@ static int guest_vformat(char *out, int cap, const char *fmt, uint32_t sp) {
         case 'u': case 'x': case 'X': case 'o': {
             uint32_t v = *(uint32_t *)GADDR(sp); sp += 4;
             char cs[2] = { conv, 0 };
-            snprintf(piece, sizeof(piece), "%s%s%s", spec, lng ? "l" : "", cs);
+            snprintf(piece, sizeof(piece), "%%%s%s%s", spec, lng ? "l" : "", cs);
             unsigned long lv = v;
             n += snprintf(out + n, (size_t)(cap - n), piece, lv);
             break;
@@ -200,7 +202,7 @@ static int guest_vformat(char *out, int cap, const char *fmt, uint32_t sp) {
             double v;
             memcpy(&v, GADDR(sp), 8); sp += 8;
             char cs[2] = { conv, 0 };
-            snprintf(piece, sizeof(piece), "%s%s", spec, cs);
+            snprintf(piece, sizeof(piece), "%%%s%s", spec, cs);
             n += snprintf(out + n, (size_t)(cap - n), piece, v);
             break;
         }
@@ -242,8 +244,12 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
     }
 
     static int trace = -1;
+    static int burst = 0;                 /* 诊断: 强制打印接下来 N 个垫片调用 */
     if (trace < 0) trace = getenv("VE_TRACE") ? 1 : 0;
-    if (trace) ve_log("SHIM %s!%s esp=0x%08x", dll, fn, c->reg[4]);
+    if (burst > 0) { burst--; ve_log("SHIM %s!%s esp=0x%08x", dll, fn, c->reg[4]); }
+    else if (trace) ve_log("SHIM %s!%s esp=0x%08x", dll, fn, c->reg[4]);
+    extern int ve_shim_burst_req;
+    if (ve_shim_burst_req > 0) { burst = ve_shim_burst_req; ve_shim_burst_req = 0; }
 
     if (strcasecmp(dll, "KERNEL32.dll") == 0) {
         if (!strcmp(fn, "Sleep")) { usleep((useconds_t)A(0) * 1000); STD(4); c->reg[0] = 0; goto done; }
@@ -505,7 +511,7 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
         if (!strcmp(fn, "GetStringTypeA") || !strcmp(fn, "GetStringTypeW")) { STD(20); c->reg[0] = 0; goto done; }
     }
     else if (strcasecmp(dll, "ADVAPI32.dll") == 0) {
-        /* ---- ViaVoice ECIINI 伪注册表 (数据源自 libq4 内嵌表 eciini_vals) ---- */
+        /* ---- ViaVoice ECIINI 伪注册表 (数据源自 libq4 内嵌表 eciini_vals, 全量) ---- */
         static const struct { const char *sub, *name, *val; } k_ini[] = {
             {"6.0", "Path", "{D}/chs50.syn"},
             {"6.0", "Path_Rom", "{D}/chsrom.dll"},
@@ -522,6 +528,91 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
             {"6.0", "Voice6", "1 56 89 35 0 40 70 95"},
             {"6.0", "Voice7", "1 45 68 30 3 40 50 90"},
             {"6.0", "Voice8", "0 30 61 44 18 20 50 90"},
+            {"6.0", "Phoneme0", "65 0 0 0 0 0 0 75 150 128 100 130 175 200 125"},
+            {"6.0", "Phoneme1", "66 0 0 0 0 0 0 100 125 128 200 150 130 150 150"},
+            {"6.0", "Phoneme2", "67 0 0 0 0 0 0 75 125 128 100 130 130 0 200"},
+            {"6.0", "Phoneme3", "68 0 0 0 0 0 0 50 100 128 25 130 130 180 125"},
+            {"6.0", "Phoneme4", "69 0 0 0 0 0 0 50 100 128 75 130 175 0 125"},
+            {"6.0", "Phoneme5", "70 0 0 0 0 0 0 75 150 128 50 130 130 255 0"},
+            {"6.0", "Phoneme6", "71 0 0 0 0 0 0 50 100 128 75 130 130 0 0"},
+            {"6.0", "Phoneme7", "72 0 0 0 0 0 0 50 75 128 100 150 130 0 100"},
+            {"6.0", "Phoneme8", "73 0 0 0 0 0 0 50 100 128 50 130 175 0 125"},
+            {"6.0", "Phoneme9", "74 0 0 0 0 0 0 75 125 128 100 130 130 0 200"},
+            {"6.0", "Phoneme10", "79 0 0 0 0 0 0 25 0 130 150 60 60 0 255"},
+            {"6.0", "Phoneme11", "82 0 0 0 0 0 0 75 100 128 75 130 0 0 150"},
+            {"6.0", "Phoneme12", "83 0 0 0 0 0 0 75 125 128 100 130 130 0 200"},
+            {"6.0", "Phoneme13", "84 0 0 0 0 0 0 50 100 128 25 130 130 180 125"},
+            {"6.0", "Phoneme14", "85 0 0 0 0 0 0 25 0 130 90 60 60 0 255"},
+            {"6.0", "Phoneme15", "89 0 0 0 0 0 0 100 125 128 200 150 130 150 150"},
+            {"6.0", "Phoneme16", "90 0 0 0 0 0 0 75 125 128 100 130 130 0 200"},
+            {"6.0", "Phoneme17", "97 0 0 0 0 0 0 100 125 128 200 150 130 150 150"},
+            {"6.0", "Phoneme18", "98 0 0 0 0 0 0 0 100 128 0 0 0 0 200"},
+            {"6.0", "Phoneme19", "99 0 0 0 0 0 0 50 160 0 50 128 128 160 0"},
+            {"6.0", "Phoneme20", "100 0 0 0 0 0 0 75 150 128 50 130 130 255 0"},
+            {"6.0", "Phoneme21", "101 0 0 0 0 0 0 50 100 128 75 130 175 0 255"},
+            {"6.0", "Phoneme22", "102 0 0 0 0 0 0 10 100 128 25 130 0 0 200"},
+            {"6.0", "Phoneme23", "103 0 0 0 0 0 0 50 100 128 75 130 130 0 0"},
+            {"6.0", "Phoneme24", "104 0 0 0 0 0 0 50 100 128 75 130 130 0 0"},
+            {"6.0", "Phoneme25", "105 0 0 0 0 0 0 25 150 128 50 130 130 0 255"},
+            {"6.0", "Phoneme26", "107 0 0 0 0 0 0 50 100 128 75 130 130 0 0"},
+            {"6.0", "Phoneme27", "108 0 0 0 0 0 0 75 150 128 50 130 130 255 0"},
+            {"6.0", "Phoneme28", "109 0 0 0 0 0 0 0 100 128 0 0 0 0 200"},
+            {"6.0", "Phoneme29", "110 0 0 0 0 0 0 75 150 128 50 130 130 255 0"},
+            {"6.0", "Phoneme30", "111 0 0 0 0 0 0 25 0 130 130 60 60 0 255"},
+            {"6.0", "Phoneme31", "112 0 0 0 0 0 0 0 100 128 0 0 0 0 200"},
+            {"6.0", "Phoneme32", "114 0 0 0 0 0 0 75 50 128 75 130 0 0 175"},
+            {"6.0", "Phoneme33", "115 0 0 0 0 0 0 50 100 128 75 130 130 150 0"},
+            {"6.0", "Phoneme34", "116 0 0 0 0 0 0 75 150 128 50 130 130 255 0"},
+            {"6.0", "Phoneme35", "117 0 0 0 0 0 0 25 0 130 90 60 60 0 255"},
+            {"6.0", "Phoneme36", "118 0 0 0 0 0 0 10 100 128 25 130 0 0 200"},
+            {"6.0", "Phoneme37", "119 0 0 0 0 0 0 25 0 130 90 60 60 0 255"},
+            {"6.0", "Phoneme38", "120 0 0 0 0 0 0 10 50 128 75 130 0 0 0"},
+            {"6.0", "Phoneme39", "121 0 0 0 0 0 0 25 150 128 50 130 130 0 255"},
+            {"6.0", "Phoneme40", "122 0 0 0 0 0 0 50 100 128 75 130 130 150 0"},
+            {"6.0", "Phoneme41", "95 65 0 0 0 0 0 75 150 128 100 130 175 200 125"},
+            {"6.0", "Phoneme42", "95 66 0 0 0 0 0 100 125 128 200 150 130 150 150"},
+            {"6.0", "Phoneme43", "95 68 0 0 0 0 0 75 125 128 100 130 130 0 200"},
+            {"6.0", "Phoneme44", "95 69 0 0 0 0 0 50 100 128 75 130 175 0 125"},
+            {"6.0", "Phoneme45", "95 71 0 0 0 0 0 50 100 128 75 130 130 0 0"},
+            {"6.0", "Phoneme46", "95 72 0 0 0 0 0 50 100 128 75 130 175 0 255"},
+            {"6.0", "Phoneme47", "95 73 0 0 0 0 0 50 100 128 50 130 175 0 125"},
+            {"6.0", "Phoneme48", "95 79 0 0 0 0 0 25 0 130 90 60 60 0 255"},
+            {"6.0", "Phoneme49", "95 82 0 0 0 0 0 25 150 128 50 130 130 0 255"},
+            {"6.0", "Phoneme50", "95 83 0 0 0 0 0 75 125 128 100 130 130 0 200"},
+            {"6.0", "Phoneme51", "95 84 0 0 0 0 0 75 125 128 100 130 130 0 200"},
+            {"6.0", "Phoneme52", "95 85 0 0 0 0 0 50 160 0 50 128 128 160 0"},
+            {"6.0", "Phoneme53", "95 86 0 0 0 0 0 25 0 130 90 60 60 0 255"},
+            {"6.0", "Phoneme54", "95 87 0 0 0 0 0 75 150 128 50 130 130 255 0"},
+            {"6.0", "Phoneme55", "95 88 0 0 0 0 0 50 160 0 50 128 128 160 0"},
+            {"6.0", "Phoneme56", "95 89 0 0 0 0 0 75 125 128 100 130 130 0 200"},
+            {"6.0", "Phoneme57", "95 97 0 0 0 0 0 100 125 128 200 150 130 150 150"},
+            {"6.0", "Phoneme58", "95 98 0 0 0 0 0 0 100 128 0 0 0 0 200"},
+            {"6.0", "Phoneme59", "95 99 0 0 0 0 0 25 150 128 50 130 130 0 255"},
+            {"6.0", "Phoneme60", "95 100 0 0 0 0 0 25 150 128 50 130 130 0 255"},
+            {"6.0", "Phoneme61", "95 101 0 0 0 0 0 50 100 128 75 130 175 0 255"},
+            {"6.0", "Phoneme62", "95 102 0 0 0 0 0 10 100 128 25 130 0 0 200"},
+            {"6.0", "Phoneme63", "95 103 0 0 0 0 0 50 100 128 75 130 130 0 0"},
+            {"6.0", "Phoneme64", "95 104 0 0 0 0 0 50 100 128 75 130 130 0 0"},
+            {"6.0", "Phoneme65", "95 105 0 0 0 0 0 25 150 128 50 130 130 0 255"},
+            {"6.0", "Phoneme66", "95 106 0 0 0 0 0 75 150 128 50 130 130 255 0"},
+            {"6.0", "Phoneme67", "95 107 0 0 0 0 0 50 100 128 75 130 130 0 0"},
+            {"6.0", "Phoneme68", "95 108 0 0 0 0 0 75 150 128 50 130 130 255 0"},
+            {"6.0", "Phoneme69", "95 109 0 0 0 0 0 0 100 128 0 0 0 0 200"},
+            {"6.0", "Phoneme70", "95 110 0 0 0 0 0 75 150 128 50 130 130 255 0"},
+            {"6.0", "Phoneme71", "95 111 0 0 0 0 0 75 150 128 50 130 130 255 0"},
+            {"6.0", "Phoneme72", "95 112 0 0 0 0 0 0 100 128 0 0 0 0 200"},
+            {"6.0", "Phoneme73", "95 113 0 0 0 0 0 0 100 128 0 0 0 0 200"},
+            {"6.0", "Phoneme74", "95 114 0 0 0 0 0 75 50 128 75 130 0 0 175"},
+            {"6.0", "Phoneme75", "95 115 0 0 0 0 0 50 100 128 75 130 130 150 0"},
+            {"6.0", "Phoneme76", "95 116 0 0 0 0 0 75 150 128 50 130 130 255 0"},
+            {"6.0", "Phoneme77", "95 117 0 0 0 0 0 25 0 130 90 60 60 0 255"},
+            {"6.0", "Phoneme78", "95 118 0 0 0 0 0 10 100 128 25 130 0 0 200"},
+            {"6.0", "Phoneme79", "95 118 0 0 0 0 0 25 0 130 90 60 60 0 255"},
+            {"6.0", "Phoneme80", "95 119 0 0 0 0 0 0 100 128 0 0 0 0 200"},
+            {"6.0", "Phoneme81", "95 120 0 0 0 0 0 25 150 128 50 130 130 0 255"},
+            {"6.0", "Phoneme82", "95 121 0 0 0 0 0 25 150 128 50 130 130 0 255"},
+            {"6.0", "Phoneme83", "95 64 0 0 0 0 0 75 50 128 75 130 0 0 175"},
+            {"6.0", "Phoneme84", "164 0 0 0 0 0 0 0 170 128 0 0 0 0 0"},
             {"LanguageIndependent", "Path_Cmm", "{D}/ibmcmm.dll"},
             {"LanguageIndependent", "Path_Cat", "{D}/torrent.dll"},
         };
@@ -540,6 +631,8 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
                 else hk = 0x100;
             }
             if (A(4)) *(uint32_t *)ve_guest_ptr(A(4)) = hk;
+            extern int ve_reg_trace;
+            if (ve_reg_trace) ve_log("REGOPEN parent=0x%x sub=%s → 0x%x", parent, sub, hk);
             STD(20); c->reg[0] = 0; goto done;   /* ERROR_SUCCESS */
         }
         if (!strcmp(fn, "RegCreateKeyExA")) {
@@ -551,6 +644,15 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
             const char *name = cp(A(1));
             extern int ve_reg_trace;
             if (ve_reg_trace) ve_log("REGQ hk=0x%x name=%s", hk, name);
+            {   /* 断路器: Phoneme 查询满 200 次 → 打印接下来 80 个垫片调用 + sscanf 细节 */
+                static int s_phn = 0;
+                extern int ve_sscanf_trace;
+                if (!strncmp(name, "Phoneme", 7) && ++s_phn == 200) {
+                    ve_shim_burst_req = 80;
+                    ve_sscanf_trace = 20;
+                }
+                if (!strcmp(name, "CallbackFlag")) ve_sscanf_trace = 4;
+            }
             const char *subname = hk == 0x101 ? "6.0" : (hk == 0x102 ? "LanguageIndependent" : NULL);
             const char *val = NULL;
             if (subname) {
@@ -579,7 +681,14 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
                 uint32_t len = (uint32_t)strlen(expanded) + 1;
                 if (A(3)) *(uint32_t *)ve_guest_ptr(A(3)) = 1;   /* REG_SZ */
                 if (A(5)) *(uint32_t *)ve_guest_ptr(A(5)) = len;
-                if (A(4) && A(2) >= len) memcpy(ve_guest_ptr(A(4)), expanded, len);
+                /* A(5)=lpcbData 指针, 读入方缓冲尺寸; A(2) 是 lpReserved (恒 NULL) */
+                uint32_t cb = 0xFFFFFFFFu;
+                if (A(5)) { uint32_t *pv = (uint32_t *)ve_guest_ptr(A(5)); if (pv) cb = *pv; }
+                extern int ve_reg_trace;
+                if (ve_reg_trace && !strncmp(name, "Phoneme", 7) && name[7] == '0' && !name[8])
+                    ve_log("REGQ-DATA %s lpData=0x%08x cb_in=%u len=%u → %s",
+                           name, A(4), cb, len, (A(4) && cb >= len) ? "拷贝" : "未拷贝");
+                if (A(4) && cb >= len) memcpy(ve_guest_ptr(A(4)), expanded, len);
                 STD(24); c->reg[0] = 0; goto done;
             }
             if (A(3)) *(uint32_t *)ve_guest_ptr(A(3)) = 4;
@@ -593,12 +702,27 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
             /* 12 参; 计数出参必须写 (调用方据 lpcMax*Len 分配缓冲!) */
             uint32_t outs[8] = { A(4), A(5), A(6), A(7), A(8), A(9), A(10), 0 };
             uint32_t vals[8] = { 0, 260, 260, 0, 260, 0x400, 4, 0 };
+            /* 根键有 2 个子键: "6.0" / "LanguageIndependent" (max len=19) */
+            if (A(0) == 0x100 || A(0) == 0x1FF) { vals[0] = 2; vals[1] = 19; }
             for (int i = 0; i < 7; i++)
                 if (outs[i]) *(uint32_t *)ve_guest_ptr(outs[i]) = vals[i];
             if (A(11)) memset(ve_guest_ptr(A(11)), 0, 8);   /* lpftLastWriteTime */
             STD(48); c->reg[0] = 0; goto done;
         }
-        if (!strcmp(fn, "RegEnumKeyExA")) { STD(32); c->reg[0] = 259; goto done; }
+        if (!strcmp(fn, "RegEnumKeyExA")) {
+            static const char *root_keys[] = { "6.0", "LanguageIndependent" };
+            uint32_t idx = A(1);
+            if ((A(0) == 0x100 || A(0) == 0x1FF) && idx < 2) {
+                const char *nm = root_keys[idx];
+                uint32_t n = (uint32_t)strlen(nm);
+                uint32_t cap = 0xFFFFFFFFu;
+                if (A(3)) { uint32_t *pc = (uint32_t *)ve_guest_ptr(A(3)); if (pc) { cap = *pc; *pc = n; } }
+                if (A(2) && cap >= n) memcpy(ve_guest_ptr(A(2)), nm, n + 1);
+                ve_log("REGENUM idx=%u → %s", idx, nm);
+                STD(32); c->reg[0] = 0; goto done;
+            }
+            STD(32); c->reg[0] = 259; goto done;   /* ERROR_NO_MORE_ITEMS */
+        }
         if (!strcmp(fn, "RegDeleteKeyA") || !strcmp(fn, "RegDeleteValueA")) { STD(8); c->reg[0] = 2; goto done; }
         if (!strcmp(fn, "InitializeSecurityDescriptor") || !strcmp(fn, "SetSecurityDescriptorDacl")) { STD(8); c->reg[0] = 1; goto done; }
     }
@@ -725,7 +849,22 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
         if (!strcmp(fn, "strchr")) { char *r = strchr(cp(A(0)), (int)A(1)); c->reg[0] = r ? A(0) + (uint32_t)(r - cp(A(0))) : 0; return 0; }
         if (!strcmp(fn, "strrchr")) { char *r = strrchr(cp(A(0)), (int)A(1)); c->reg[0] = r ? A(0) + (uint32_t)(r - cp(A(0))) : 0; return 0; }
         if (!strcmp(fn, "strstr")) { char *r = strstr(cp(A(0)), cp(A(1))); c->reg[0] = r ? A(0) + (uint32_t)(r - cp(A(0))) : 0; return 0; }
-        if (!strcmp(fn, "strtok")) { char *r = strtok(cp(A(0)), cp(A(1))); c->reg[0] = r ? A(0) + (uint32_t)(r - cp(A(0))) : 0; return 0; }
+        if (!strcmp(fn, "strtok")) {
+            /* guest NULL(0) 必须映射为宿主 NULL; strtok(NULL,..) 是续读状态 */
+            char *in = A(0) ? cp(A(0)) : NULL;
+            char *r = strtok(in, cp(A(1)));
+            extern uintptr_t g_ve_off;
+            c->reg[0] = r ? (uint32_t)((uintptr_t)r - g_ve_off) : 0;
+            {   static int s_n = 0;
+                extern int ve_sscanf_trace;
+                if (ve_sscanf_trace > 0 || s_n < 6) {
+                    if (s_n < 6) s_n++;
+                    ve_log("STRTOK in=0x%08x delim=0x%08x → 0x%08x %s",
+                           A(0), A(1), c->reg[0], r ? r : "(null)");
+                }
+            }
+            return 0;
+        }
         if (!strcmp(fn, "_strdup")) { const char *s = cp(A(0)); uint32_t p = ve_heap_alloc((uint32_t)strlen(s) + 1); strcpy(cp(p), s); c->reg[0] = p; return 0; }
         if (!strcmp(fn, "isdigit")) { c->reg[0] = (uint32_t)isdigit((int)A(0)); return 0; }
         if (!strcmp(fn, "isspace")) { c->reg[0] = (uint32_t)isspace((int)A(0)); return 0; }
@@ -737,7 +876,14 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
         if (!strcmp(fn, "atol")) { c->reg[0] = (uint32_t)atol(cp(A(0))); return 0; }
         if (!strcmp(fn, "atof")) { double v = atof(cp(A(0))); c->ftop = (c->ftop + 7) & 7; c->st[c->ftop] = v; return 0; }
         if (!strcmp(fn, "strtol")) { c->reg[0] = (uint32_t)strtol(cp(A(0)), A(1) ? (char **)ve_guest_ptr(A(1)) : NULL, (int)A(2)); return 0; }
-        if (!strcmp(fn, "strtod")) { c->reg[0] = 0; return 0; }
+        if (!strcmp(fn, "strtod")) {
+            char *end;
+            double v = strtod(cp(A(0)), A(1) ? (char **)ve_guest_ptr(A(1)) : NULL);
+            c->ftop = (c->ftop + 7) & 7;      /* double 返回约定: x87 st0 */
+            c->st[c->ftop] = (long double)v;
+            c->reg[0] = 0;
+            return 0;
+        }
         if (!strcmp(fn, "div") || !strcmp(fn, "ldiv")) {
             uint32_t p = ve_heap_alloc(8);
             *(int32_t *)ve_guest_ptr(p) = (int32_t)A(0) / (int32_t)A(1);
@@ -750,9 +896,22 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
         if (!strcmp(fn, "time")) { c->reg[0] = (uint32_t)time(NULL); return 0; }
         if (!strcmp(fn, "clock")) { c->reg[0] = (uint32_t)clock(); return 0; }
         if (!strcmp(fn, "_ftime")) { memset(ve_guest_ptr(A(0)), 0, 8); return 0; }
-        if (!strcmp(fn, "pow")) { double a, b, r; memcpy(&a, GADDR(A(0)), 8); memcpy(&b, GADDR(A(1)), 8); r = pow(a, b); c->ftop = (c->ftop + 7) & 7; c->st[c->ftop] = r; return 0; }
-        if (!strcmp(fn, "exp")) { double a, r; memcpy(&a, GADDR(A(0)), 8); r = exp(a); c->ftop = (c->ftop + 7) & 7; c->st[c->ftop] = r; return 0; }
-        if (!strcmp(fn, "log")) { double a, r; memcpy(&a, GADDR(A(0)), 8); r = log(a); c->ftop = (c->ftop + 7) & 7; c->st[c->ftop] = r; return 0; }
+        /* cdecl double 按值传参: 第 n 个 double = 栈上 {A(2n), A(2n+1)} 两个 dword */
+#define VD(n) ({ uint64_t _b = (uint64_t)A(2 * (n)) | ((uint64_t)A(2 * (n) + 1) << 32); \
+                double _d; memcpy(&_d, &_b, 8); _d; })
+        if (!strcmp(fn, "pow")) { double r = pow(VD(0), VD(1)); c->ftop = (c->ftop + 7) & 7; c->st[c->ftop] = r; return 0; }
+        if (!strcmp(fn, "exp")) { double r = exp(VD(0)); c->ftop = (c->ftop + 7) & 7; c->st[c->ftop] = r; return 0; }
+        if (!strcmp(fn, "log")) { double r = log(VD(0)); c->ftop = (c->ftop + 7) & 7; c->st[c->ftop] = r; return 0; }
+        if (!strcmp(fn, "log10")) { double r = log10(VD(0)); c->ftop = (c->ftop + 7) & 7; c->st[c->ftop] = r; return 0; }
+        if (!strcmp(fn, "sqrt")) { double r = sqrt(VD(0)); c->ftop = (c->ftop + 7) & 7; c->st[c->ftop] = r; return 0; }
+        if (!strcmp(fn, "fabs")) { double r = fabs(VD(0)); c->ftop = (c->ftop + 7) & 7; c->st[c->ftop] = r; return 0; }
+        if (!strcmp(fn, "floor")) { double r = floor(VD(0)); c->ftop = (c->ftop + 7) & 7; c->st[c->ftop] = r; return 0; }
+        if (!strcmp(fn, "ceil")) { double r = ceil(VD(0)); c->ftop = (c->ftop + 7) & 7; c->st[c->ftop] = r; return 0; }
+        if (!strcmp(fn, "sin")) { double r = sin(VD(0)); c->ftop = (c->ftop + 7) & 7; c->st[c->ftop] = r; return 0; }
+        if (!strcmp(fn, "cos")) { double r = cos(VD(0)); c->ftop = (c->ftop + 7) & 7; c->st[c->ftop] = r; return 0; }
+        if (!strcmp(fn, "atan")) { double r = atan(VD(0)); c->ftop = (c->ftop + 7) & 7; c->st[c->ftop] = r; return 0; }
+        if (!strcmp(fn, "atan2")) { double r = atan2(VD(0), VD(1)); c->ftop = (c->ftop + 7) & 7; c->st[c->ftop] = r; return 0; }
+        if (!strcmp(fn, "fmod")) { double r = fmod(VD(0), VD(1)); c->ftop = (c->ftop + 7) & 7; c->st[c->ftop] = r; return 0; }
         if (!strcmp(fn, "_ftol")) {
             long double v = c->st[c->ftop];
             c->ftop = (c->ftop + 1) & 7;
@@ -769,6 +928,17 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
         if (!strcmp(fn, "_adjust_fdiv")) { c->reg[0] = 0; return 0; }
         if (!strcmp(fn, "_purecall")) { ve_log("purecall!"); c->reg[0] = 0; return 0; }
         if (!strcmp(fn, "exit")) { ve_log("guest exit(%u)", A(0)); c->eip = 0x0EFFFFFFu; return 0; }
+        if (!strcmp(fn, "_ftol") || !strcmp(fn, "__ftol") || !strcmp(fn, "_ftol2") ||
+            !strcmp(fn, "_ftol2_sse") || !strcmp(fn, "_CIftol")) {
+            /* st0 → 截断 → edx:eax (MSVC x87→int helper) */
+            long double v = c->st[c->ftop];
+            c->st[c->ftop] = 0;
+            c->ftop = (c->ftop + 1) & 7;
+            int64_t t = (int64_t)v;
+            c->reg[0] = (uint32_t)t;
+            c->reg[2] = (uint32_t)((uint64_t)t >> 32);
+            return 0;
+        }
         if (!strcmp(fn, "?terminate@@YAXXZ")) { ve_log("terminate"); c->eip = 0x0EFFFFFFu; return 0; }
         if (!strcmp(fn, "_initterm")) {
             uint32_t p = A(0);
@@ -793,7 +963,8 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
             g_h[h].exitcode = -1;
             pthread_create(&g_h[h].th, NULL, thread_main, t);
             if (A(5)) *(uint32_t *)ve_guest_ptr(A(5)) = (uint32_t)(uintptr_t)g_h[h].th;
-            STD(24); c->reg[0] = (uint32_t)h; goto done;
+            /* MSVCRT 全 cdecl: 调用方自清 24 字节 (0x1fc40 add esp,0x18 铁证), 垫片不弹 */
+            c->reg[0] = (uint32_t)h; goto done;
         }
         if (!strcmp(fn, "_setjmp3")) {
             uint32_t *b = ve_guest_ptr(A(0));
@@ -826,24 +997,137 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
         }
         if (!strcmp(fn, "sprintf") || !strcmp(fn, "vsprintf") || !strcmp(fn, "_snprintf")) {
             char tmp[4096];
-            uint32_t varg = !strcmp(fn, "vsprintf") ? A(2) : c->reg[4] + 12;
+            /* FF/2 已弹返回地址: arg1@[esp], arg2@[esp+4], 首变参 arg3@[esp+8] */
+            uint32_t varg = !strcmp(fn, "vsprintf") ? A(2) : c->reg[4] + 8;
             int n = guest_vformat(tmp, sizeof(tmp), cp(A(1)), varg);
+            {   /* 定点诊断: 音素名生成 */
+                if (strstr(cp(A(1)), "Phoneme")) ve_log("SPRINTF → \"%s\"", tmp);
+            }
             strcpy(cp(A(0)), tmp);
             c->reg[0] = (uint32_t)n;
             return 0;
         }
         if (!strcmp(fn, "vfprintf") || !strcmp(fn, "fprintf")) {
             char tmp[4096];
-            uint32_t varg = !strcmp(fn, "vfprintf") ? A(2) : c->reg[4] + 12;
+            uint32_t varg = !strcmp(fn, "vfprintf") ? A(2) : c->reg[4] + 8;
             guest_vformat(tmp, sizeof(tmp), cp(A(1)), varg);
             ve_log("CRT: %s", tmp);
             return 0;
         }
         if (!strcmp(fn, "sscanf")) {
+            /* 通用子集: %[*][width][l/h] d u x X o f e g s c n —
+             * 引擎用 "%d %d ..." 解析注册表音素/语音参数串 (15 个数) */
+            char *ip = cp(A(0));
             const char *f = cp(A(1));
-            if (strstr(f, "%d")) *(int32_t *)ve_guest_ptr(A(2)) = atoi(cp(A(0)));
-            else if (strstr(f, "%s")) strcpy(cp(A(2)), cp(A(0)));
-            c->reg[0] = 1;
+            int next_arg = 2, matched = 0;
+            int traced = 0;
+            {   /* 定点诊断: 前 40 条 + 显式请求的都记 */
+                static int s_always = 0;
+                extern int ve_sscanf_trace;
+                if (ve_sscanf_trace > 0) {
+                    ve_sscanf_trace--;
+                    ve_log("SSCANF @0x%08x in=\"%.60s\" fmt=\"%.60s\"", c->eip, ip, f);
+                    traced = 1;
+                } else if (s_always < 40 && !strstr(f, "%hd")) {   /* 跳过音素串 */
+                    s_always++;
+                    ve_log("SSCANF @0x%08x in=\"%.60s\" fmt=\"%.60s\"", c->eip, ip, f);
+                    traced = 1;
+                }
+            }
+            const char *p = f;
+            while (*p) {
+                if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
+                    while (*ip == ' ' || *ip == '\t' || *ip == '\n' || *ip == '\r') ip++;
+                    p++;
+                    continue;
+                }
+                if (*p != '%') {
+                    if (*ip != *p) break;
+                    ip++; p++;
+                    continue;
+                }
+                p++;
+                int suppress = 0, width = 0, lng = 0;
+                if (*p == '*') { suppress = 1; p++; }
+                while (*p >= '0' && *p <= '9') { width = width * 10 + (*p - '0'); p++; }
+                while (*p == 'l' || *p == 'h' || *p == 'I') {
+                    if (*p == 'l' && *(p + 1) == 'l') { lng = 2; p++; }
+                    else if (*p == 'l') lng = 1;   /* Win32: long=4字节 */
+                    p++;
+                }
+                char conv = *p;
+                if (!conv) break;
+                p++;
+                if (conv == 'n') {
+                    if (!suppress) {
+                        uint32_t ap = A(next_arg++);
+                        if (ap) *(int32_t *)ve_guest_ptr(ap) = (int32_t)(ip - cp(A(0)));
+                    }
+                    continue;
+                }
+                if (conv == 'c') {
+                    int n = width ? width : 1;
+                    if (!*ip && n > 0) break;
+                    if (!suppress) {
+                        uint32_t ap = A(next_arg++);
+                        char *d = ap ? (char *)ve_guest_ptr(ap) : NULL;
+                        for (int i = 0; i < n; i++) { if (d) *d++ = *ip; ip++; }
+                    } else ip += n;
+                    matched++;
+                    continue;
+                }
+                /* 其余转换先跳输入空白 */
+                while (*ip == ' ' || *ip == '\t' || *ip == '\n' || *ip == '\r') ip++;
+                if (conv == 's') {
+                    if (!*ip) break;
+                    uint32_t ap = suppress ? 0 : A(next_arg++);
+                    char *d = ap ? (char *)ve_guest_ptr(ap) : NULL;
+                    int n = 0;
+                    while (*ip && *ip != ' ' && *ip != '\t' && *ip != '\n' &&
+                           (!width || n < width)) {
+                        if (d) *d++ = *ip;
+                        ip++; n++;
+                    }
+                    if (d) *d = 0;
+                    matched++;
+                    continue;
+                }
+                if (conv == 'd' || conv == 'i' || conv == 'u' || conv == 'x' || conv == 'X' || conv == 'o') {
+                    char *end;
+                    int base = (conv == 'd' || conv == 'u' || conv == 'i') ? 10 : (conv == 'o' ? 8 : 16);
+                    long v = strtol(ip, &end, base);
+                    if (end == ip) break;
+                    ip = end;
+                    if (!suppress) {
+                        uint32_t ap = A(next_arg++);
+                        if (ap) {
+                            /* Win32: long=4字节, 只有 %lld 才写 8 */
+                            if (lng >= 2) *(int64_t *)ve_guest_ptr(ap) = (int64_t)v;
+                            else *(int32_t *)ve_guest_ptr(ap) = (int32_t)v;
+                        }
+                    }
+                    matched++;
+                    continue;
+                }
+                if (conv == 'f' || conv == 'e' || conv == 'g' || conv == 'E' || conv == 'G') {
+                    char *end;
+                    double v = strtod(ip, &end);
+                    if (end == ip) break;
+                    ip = end;
+                    if (!suppress) {
+                        uint32_t ap = A(next_arg++);
+                        if (ap) {
+                            if (lng >= 2) *(double *)ve_guest_ptr(ap) = v;
+                            else *(float *)ve_guest_ptr(ap) = (float)v;
+                        }
+                    }
+                    matched++;
+                    continue;
+                }
+                break;   /* 未知转换 (如 %[) */
+            }
+            if (traced) ve_log("SSCANF → matched=%d eax=%u", matched, (uint32_t)matched);
+            c->reg[0] = (uint32_t)matched;
             return 0;
         }
         if (!strcmp(fn, "fopen") || !strcmp(fn, "_wfopen")) {
@@ -886,14 +1170,17 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
         if (!strcmp(fn, "getchar")) { c->reg[0] = (uint32_t)-1; return 0; }
         if (!strcmp(fn, "perror")) { return 0; }
         if (!strcmp(fn, "qsort")) {
+            /* 插入排序: 暂存元素放 guest 堆临时块 (比较器只认 guest 地址) */
             uint32_t base = A(0), n = A(1), sz = A(2), cmp = A(3);
             uint8_t *tmp = malloc(sz);
+            uint32_t scratch = ve_heap_alloc(sz);
             for (uint32_t i = 1; i < n; i++) {
-                memcpy(ve_guest_ptr(base + i * sz), tmp, sz);   /* 先占位 */
                 memcpy(tmp, ve_guest_ptr(base + i * sz), sz);
+                if (scratch) memcpy(ve_guest_ptr(scratch), tmp, sz);
                 int32_t j = (int32_t)i - 1;
                 while (j >= 0) {
-                    uint32_t args[2] = { base + (uint32_t)j * sz, base + i * sz };
+                    uint32_t args[2] = { base + (uint32_t)j * sz,
+                                         scratch ? scratch : base + i * sz };
                     ve_call_guest(c, cmp, 2, args);
                     if ((int32_t)c->reg[0] <= 0) break;
                     memcpy(ve_guest_ptr(base + (uint32_t)(j + 1) * sz),
@@ -903,6 +1190,7 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
                 memcpy(ve_guest_ptr(base + (uint32_t)(j + 1) * sz), tmp, sz);
             }
             free(tmp);
+            if (scratch) ve_heap_free(scratch);
             return 0;
         }
         if (!strcmp(fn, "bsearch")) {

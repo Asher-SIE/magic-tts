@@ -196,3 +196,69 @@ Synthesize → Synchronize → eciDelete **全链路无崩溃跑完** (历史首
   一位, 不影响行为, 垫片按名分发)
 - **下轮抓手**: 0x1001fa60 / 0x1001fc40 出入探针 (哪个提前退出); 若它们
   内部判错 → 沿判错条件找数据源 (注册表值/字符串/分配)
+
+## 十二、第八轮：十连修 — 引擎从"ctor 崩溃"推进到"最后一哩" (2026-10-18)
+
+### 修复清单 (全部实锤, 按 discovery 顺序)
+1. **_beginthreadex 误 STD(24)**: MSVCRT 全 cdecl, 调用方 0x1001fc60 `add esp,0x18`
+   自清 — 双重清栈 24 字节 → ret 读错槽 → 基类 ctor 0x100128bc 跳帧返回
+   (esp 对、ebp 不恢复 → 外层 ctor 用错帧读 this=NULL → 0x10013510 崩).
+   "ebp 漂移-0x8C"实为子帧正常遮蔽, 非 bug.
+2. **RegQueryValueExA 尺寸取自 lpReserved(A(2))**: 应读 *lpcbData(A(5)指针)
+   → memcpy 永不执行 → 引擎永远拿空串 → LoadLibraryA("") 失败 (chs.uil/
+   chsrom/chs50.syn DllMain rc=5 的真因).
+3. **x87 m64/m32 访存漏 GADDR**: fld_m64/WM64(FST m64/FILD m64)/DB-FILD m32/
+   DA-FIST m16/FRSTOR — chs50.syn DSP 代码一进 double 就炸.
+4. **sprintf 格式器丢前导 %**: piece 拼成 "u"/"d" 无 % → "Phoneme%u" 出
+   "Phonemeu"、"%u.u" 出 "u.u" (诡异子键名的真因).
+5. **sprintf/fprintf 变参起点 esp+12**: 应 esp+8 (FF/2 已弹返回地址) → 指针
+   当整数打印 ("Phoneme371202264").
+6. **Win32 long=4 字节**: sscanf %ld 写 8 字节重叠邻位字段 (音素表 0x30/项
+   全毁); l 计数改 lng≥2 才 8 字节.
+7. **jle(0x7E) 条件错**: cond case7 实现成 SF==OF (那是 NL) — 正确为
+   ZF||SF≠OF. **全部 guest jle/jg 判反** (chs50 0x10176cdd 直接因此走错支).
+8. **qsort 垫片把未初始化 malloc 垫进表里** (先写后读); 重写为插入排序,
+   暂存元素放 guest 堆临时块 (比较器只认 guest 地址).
+9. **FF/2 thunk 后不修 eip**: ve_call_guest(比较器/回调)把 eip 打成 STOP
+   哨兵 — FF/4 尾跳路径有 c->eip=tail_ret 自愈, FF/2 call 路径没有 → qsort
+   一返回主循环就在 0x0EFFFFFF 零页漫步. 补 c->eip=retpc.
+10. **strtok/pow/exp/log 把 guest NULL(0)/double 位模式当指针**: strtok(NULL)
+    续读状态必须映射宿主 NULL; math 族参数按值读 {A(2n),A(2n+1)} 两槽.
+    另补 _ftol(_ftol2): st0→截断→edx:eax.
+- 附: 66 前缀 ALU imm (04/05/0C/0D…/81/83/B8) 按 osize 取 imm16 — `add ax,1`
+  曾滑 2 字节跳过 idx 写回 → 音素循环死循环 260 万次 (探针地址比对抓到).
+- sscanf 全量重写: %[*][w][l/h]diuxXofegscn, 空白/字面/宽度/抑制齐全.
+
+### 里程碑
+- ECIINI 伪注册表升级为 **libq4 内嵌表全量** (i386 指针基址 0x08048000 +
+  delta=文件偏移): "6.0" 下 Path/Path_Rom/Path_Cmm/Path_Cat/Version/
+  Concatenative/CallbackFlag("0x33f")/Voice1..8/**Phoneme0..84** + 
+  LanguageIndependent 两条. 引擎全链装载: 枚举子键→6.0→85 条音素→qsort→
+  8 条 Voice strtok 分词→CallbackFlag 解析 ("0x33f"%10x ✓).
+- 指令预算改环境变量 VE_BUDGET (单位 G, 默认 20G); 哨兵区执行拦截
+  (0x0EE00000..0x0F000000 报警而非漫步).
+
+### 当前唯一卡点: eciNew 返回 NULL = 语言工厂 -14 错误码
+精确调用链 (全部探针证实):
+```
+eciNewEx → 0x1000bdc4 (new(0xBA) obj)
+  → init 0x1000d0dd (ctor 0x100134eb ✓ 全通过)
+  → 0x1000d8b7(this+0x52, handle, param)   "启动"
+      枚举 ECIINI 子键→取最小名 "[6.0]"→剥括号 "6.0" ✓
+      new(0x11) 工厂 → 0x10013e36(this, factory)
+          → 0x1000e75d(this+0x50, factory)   [返回 NULL → -14]
+              → 0x1000e681(this, "6.0") 语言查找/装载
+                  ① 0x1000ea11 缓存查 → miss
+                  ② 0x1000e7fa(this, name) 装载器 ← ★失败点 (下一步)
+                  ③ new(0x18) 包装 → 0x1000ea64 入缓存
+  → [obj+0xB6] = -14 → delete obj → eciNew NULL
+```
+**下轮从 0x1000e7fa 开始** (疑似: 按 Path 注册表值 LoadLibrary/读文件 →
+chs50.syn 语言注册). 已知未实现导入: MSVCIRT iostream 家族 (ifstream/open/
+get/close ~20 个, chs50.syn 数据文件读取疑似走它) + torrent→ibmcmm Cmm API
+17 个 (共享内存层, 或不需要). 静态导入全清单: /tmp/imports.txt (266 项).
+- 构建命令 (必须 cd 前缀!): cd MagicTTS && clang -std=c11 -O2 -g -IBridge/include
+  -IBridge/viaemu -o /tmp/vvtts_cli scripts/test_vvtts_cli.c Bridge/viaemu/*.c
+  -lpthread -framework CoreFoundation
+- 关键探针 (ve_cpu.c probe 块): D8B7-A/B(枚举) D8B7-CHK/FAIL-RET ENGOBJ-ERR
+  ERRSRC-A/B VS-ENTRY/VS-JLE PHN-LOAD/PHN-FLOW SSCANF/SPRINTF/STRTOK 定点日志.
