@@ -10,7 +10,7 @@ struct RulesView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("朗读替换规则").font(.title3.bold())
-            Text("朗读前按序做文本替换，可修正多音字、英文缩写读法、数字符号等。普通语音全局生效；双语方案可在方案编辑里关闭。")
+            Text("朗读前按序做文本替换，可修正多音字、英文缩写读法、数字符号等。普通语音全局生效；双语方案可在方案编辑里关闭。多音字「率」等常见误读已内置修正，始终在自定义规则之后兜底。")
                 .font(.caption2).foregroundStyle(.secondary)
 
             List {

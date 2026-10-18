@@ -83,6 +83,15 @@ struct ReadingRule: Codable, Identifiable, Equatable {
         ReadingRule(find: "(\\d+(?:\\.\\d+)?)%", replace: "百分之$1", regex: true,
                     note: "正则: 50% 读「百分之50」", enabled: false),
     ]
+
+    /// 内置默认替换: 在用户规则之后兜底应用 (见 RuleStore.shared), 修正引擎普遍
+    /// 误读的多音字。同音改写, 引擎读对时听感不变, 故始终生效、不进 rules.json。
+    static let builtin: [ReadingRule] = [
+        // 「率」lǜ 义词 (圆周率/效率/概率…) 引擎易误读 shuài, 改写同音「律」;
+        // 读 shuài 的排除: 坦/轻/直/草/表/大 + 率, 以及 率先/领/真/性/尔/土 开头
+        ReadingRule(find: "(?<![坦轻直草表大])率(?!先|领|真|性|尔|土)", replace: "律", regex: true,
+                    note: "多音字: 「率」读 lǜ 的词改写同音「律」; 坦率/率先/率领 等读 shuài 的不动"),
+    ]
 }
 
 /// 启用且编译通过的规则按序就绪; 依次应用, 后一条看到前一条的结果。
@@ -130,13 +139,15 @@ enum RuleStore {
     private static let lock = NSLock()
     private static var cache: (Date?, RuleBook)?
 
-    /// 扩展侧入口: 每请求调用, 文件未变化时直接返回缓存的编译结果
+    /// 扩展侧入口: 每请求调用, 文件未变化时直接返回缓存的编译结果。
+    /// 用户规则先应用, 内置默认替换 (ReadingRule.builtin) 在其结果上兜底:
+    /// 用户按原文匹配优先, 用户规则产出的文本也会被兜底修正。
     static func shared() -> RuleBook {
         let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
             .contentModificationDate
         lock.lock(); defer { lock.unlock() }
         if let c = cache, c.0 == date { return c.1 }
-        let book = RuleBook(load())
+        let book = RuleBook(load() + ReadingRule.builtin)
         cache = (date, book)
         return book
     }

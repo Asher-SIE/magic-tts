@@ -50,6 +50,18 @@ enum CheckRulesMain {
         let dollar = RuleBook([ReadingRule(find: "价格", replace: "$1元")])
         expect("普通模式 $ 字面输出", dollar.apply("价格") == "$1元")
 
+        // 内置默认替换: 「率」读 lǜ 的词改写同音「律」, 读 shuài 的不动
+        let bi = RuleBook(ReadingRule.builtin)
+        expect("内置: 圆周率改写", bi.apply("圆周率是3.14") == "圆周律是3.14")
+        expect("内置: 效率概率频率", bi.apply("效率和概率、频率") == "效律和概律、频律")
+        expect("内置: 坦率直率不动", bi.apply("坦率 直率") == "坦率 直率")
+        expect("内置: 率先率领率真率性不动", bi.apply("率先 率领 率真 率性") == "率先 率领 率真 率性")
+        expect("内置: 表率草率轻率不动", bi.apply("表率 草率 轻率") == "表率 草率 轻率")
+
+        // 用户规则先应用, 内置在其结果上兜底 (用户产出的 ×率 也被修正)
+        let userThenBuiltin = RuleBook([ReadingRule(find: "π", replace: "圆周率")] + ReadingRule.builtin)
+        expect("内置在用户规则后兜底", userThenBuiltin.apply("π≈3.14") == "圆周律≈3.14")
+
         if failures > 0 { print("\n\(failures) 项失败"); exit(1) }
         print("\n全部通过")
     }
