@@ -33,8 +33,6 @@ struct SegmentRuleOptions: Codable, Equatable {
     var digitsToPrimary: Bool = true
     /// 孤立大写字母读时的辅助方式 (见 LetterCaseStyle; 措辞按字母朗读侧语言选)
     var letterCase: LetterCaseStyle = .none
-    /// 大写块+小写混排的非词形串 (ABCabc) 逐字母拼读, 大小写处理随之逐字母生效
-    var spellMixedRuns: Bool = true
 
     // 自定义解码: 手改 scheme.json 缺字段时回退默认值, 不整体报废
     init() {}
@@ -44,7 +42,6 @@ struct SegmentRuleOptions: Codable, Equatable {
         isolatedLetterToPrimary = try c.decodeIfPresent(Bool.self, forKey: .isolatedLetterToPrimary) ?? false
         digitsToPrimary = try c.decodeIfPresent(Bool.self, forKey: .digitsToPrimary) ?? true
         letterCase = try c.decodeIfPresent(LetterCaseStyle.self, forKey: .letterCase) ?? .none
-        spellMixedRuns = try c.decodeIfPresent(Bool.self, forKey: .spellMixedRuns) ?? true
     }
 }
 
@@ -147,27 +144,6 @@ enum TextSegmenter {
         let latinWords: Int
     }
 
-    /// 拼读判定: 存在"≥2 连续大写、其后还有小写"的块 (ABCabc ✓ 拆)。
-    /// 驼峰 (iPhone/GitHub)、全大写缩写 (NVDA)、词尾大写 (macOS) 等词形不拆。
-    static func isSpellRun(_ s: String) -> Bool {
-        let sc = Array(s.unicodeScalars)
-        func isU(_ c: UnicodeScalar) -> Bool { (0x41...0x5A).contains(c.value) }
-        func isL(_ c: UnicodeScalar) -> Bool { (0x61...0x7A).contains(c.value) }
-        guard sc.contains(where: isU), sc.contains(where: isL) else { return false }
-        var i = 0
-        while i < sc.count {
-            if isU(sc[i]) {
-                var j = i
-                while j < sc.count && isU(sc[j]) { j += 1 }
-                if j - i >= 2, sc[j...].contains(where: isL) { return true }
-                i = j
-            } else {
-                i += 1
-            }
-        }
-        return false
-    }
-
     static func route(_ runs: [Run], options: SegmentRuleOptions) -> [Routed] {
         var items: [Item] = []
         var i = 0
@@ -196,31 +172,6 @@ enum TextSegmenter {
             }
             items.append(Item(text: text, cls: .latin, latinWords: words))
             i = j
-        }
-
-        /* 字母串拼读: 混排串拆成逐字母 item (字母间补空格), 走同一条
-         * 孤立字母链 → 大小写处理逐字母生效; 词形不拆 (见 isSpellRun) */
-        if options.spellMixedRuns {
-            var expanded: [Item] = []
-            for it in items {
-                if it.cls == .latin && isSpellRun(it.text) {
-                    var prevLetter = false
-                    for ch in it.text {
-                        if let c = ch.unicodeScalars.first,
-                           (0x41...0x5A).contains(c.value) || (0x61...0x7A).contains(c.value) {
-                            if prevLetter { expanded.append(Item(text: " ", cls: .neutral, latinWords: 0)) }
-                            expanded.append(Item(text: String(ch), cls: .latin, latinWords: 1))
-                            prevLetter = true
-                        } else {
-                            expanded.append(Item(text: String(ch), cls: .neutral, latinWords: 0))
-                            prevLetter = false
-                        }
-                    }
-                } else {
-                    expanded.append(it)
-                }
-            }
-            items = expanded
         }
 
         // 第一轮: CJK/拉丁定侧 (不依赖邻居)

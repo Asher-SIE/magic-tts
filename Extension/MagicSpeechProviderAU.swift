@@ -271,6 +271,8 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
 
     /// 合成请求 — 系统送来 SSML + voice. 方案语音切段分发, 普通语音单段直通.
     public override func synthesizeSpeechRequest(_ request: AVSpeechSynthesisProviderRequest) {
+        /* 临时诊断: 原始 SSML 入档 (大小写/导航请求行为排查, 稳定后移除) */
+        Self.probeWrite("ssml=\(request.ssmlRepresentation.prefix(300))")
         let parsed = SpeechRequestParser.parse(request.ssmlRepresentation)
         let (engineKey, voiceKey) = Self.parseVoiceId(request.voice.identifier)
 
