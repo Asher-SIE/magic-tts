@@ -38,6 +38,34 @@ static int g_nshims;
 int ve_shim_burst_req = 0;   /* >0: 接下来 N 个垫片调用强制打印 (诊断) */
 int ve_sscanf_trace = 0;     /* >0: 接下来 N 个 sscanf 打印输入/格式 */
 
+/* ---- Cmm IPC 命名共享块 (pgmin/pgmout/cmdin/cmdout/prompt): 单进程内 ---- */
+typedef struct { char name[64]; uint32_t ptr; uint32_t size; int used; } VeShm;
+static VeShm g_shm[32];
+int ve_shm_find(const char *nm) {
+    if (!nm) return -1;
+    for (int i = 0; i < 32; i++)
+        if (g_shm[i].used && strcmp(g_shm[i].name, nm) == 0) return i;
+    return -1;
+}
+int ve_shm_create(const char *nm, uint32_t sz) {
+    for (int i = 0; i < 32; i++) {
+        if (!g_shm[i].used) {
+            snprintf(g_shm[i].name, 64, "%s", nm);
+            g_shm[i].size = sz;
+            g_shm[i].ptr = ve_heap_alloc(sz);
+            if (g_shm[i].ptr) memset(ve_guest_ptr(g_shm[i].ptr), 0, sz);
+            g_shm[i].used = 1;
+            ve_log("SHM-创建 %s size=0x%x @0x%08x", nm, sz, g_shm[i].ptr);
+            return g_shm[i].ptr ? i : -1;
+        }
+    }
+    return -1;
+}
+uint32_t ve_shm_ptr_of(uint32_t h) {
+    uint32_t i = h - 0x2100;
+    return (h >= 0x2100 && h < 0x2120 && g_shm[i].used) ? g_shm[i].ptr : 0;
+}
+
 void *ve_shim_slot(const char *dll, const char *func) {
     return ve_shim_slot_mod(dll, func, "");
 }
@@ -402,6 +430,36 @@ int ve_shim_dispatch(int idx, VeCPU *c) {
             return 0;
         }
         if (!strcmp(fn, "RtlUnwind")) { STD(16); c->reg[0] = 0; goto done; }
+        if (!strcmp(fn, "CreateFileMappingA") || !strcmp(fn, "OpenFileMappingA")) {
+            /* Cmm IPC 通道 (pgmin/pgmout/cmdin/cmdout/prompt): 单进程命名共享块 */
+            const char *nm = NULL;
+            uint64_t sz = 0;
+            int nargs;
+            if (fn[0] == 'C') {   /* (hFile, sa, prot, maxHi, maxLo, lpName) 6 参 */
+                nm = A(5) ? cp(A(5)) : NULL;
+                sz = ((uint64_t)A(3) << 32) | A(4);
+                nargs = 24;
+            } else {              /* (access, inherit, lpName) 3 参 */
+                nm = A(2) ? cp(A(2)) : NULL;
+                nargs = 12;
+            }
+            int hit = ve_shm_find(nm);
+            if (hit < 0 && fn[0] == 'C' && nm) {
+                uint32_t rsz = (uint32_t)(sz ? sz : 0x40000);   /* 默认 256KB */
+                hit = ve_shm_create(nm, rsz);
+            }
+            c->reg[0] = hit >= 0 ? (uint32_t)(0x2100 + hit) : 0;
+            if (hit < 0) ve_log("SHM-%s %s 失败", fn[0] == 'C' ? "创建" : "打开", nm ? nm : "(null)");
+            STD(nargs); goto done;
+        }
+        if (!strcmp(fn, "MapViewOfFile")) {
+            uint32_t h = A(0);
+            uint32_t r = ve_shm_ptr_of(h);
+            if (!r) ve_log("MapViewOfFile 未知句柄 0x%08x", h);
+            c->reg[0] = r;
+            STD(20); goto done;
+        }
+        if (!strcmp(fn, "UnmapViewOfFile")) { STD(4); c->reg[0] = 1; goto done; }
         if (!strcmp(fn, "GetModuleHandleA")) { STD(4); c->reg[0] = 0x10000000; return pop; }
         if (!strcmp(fn, "GetProcAddress")) {
             STD(8);

@@ -204,6 +204,18 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
         }
         list.append(v("自然语音·晓晓 HD", "com.magictts.naturalvoice"))
         list.append(v("OneCore·晓晓 HD", "com.magictts.onecore"))
+        /* Kona (系统 Eloquence): zh/en 各 8 发音人 — 系统组件恒在,
+         * 守护进程上下文枚举不了系统发音人, 也用静态表兜底。 */
+        let konaNames = ["Eddy", "Flo", "Grandma", "Grandpa", "Reed", "Rocko", "Sandy", "Shelley"]
+        let konaZh = ["Eddy", "Flo", "奶奶", "爷爷", "Reed", "Rocko", "Sandy", "Shelley"]
+        for (i, n) in konaNames.enumerated() {
+            list.append(v("\(konaZh[i])·中文 (Kona)", "com.magictts.kona.\(n.lowercased())-zh"))
+        }
+        for n in konaNames {
+            list.append(AVSpeechSynthesisProviderVoice(
+                name: "\(n)·English (Kona)", identifier: "com.magictts.kona.\(n.lowercased())-en",
+                primaryLanguages: ["en-US"], supportedLanguages: ["en-US"]))
+        }
         for slot in SchemeStore.slots {
             list.append(AVSpeechSynthesisProviderVoice(
                 name: SchemeStore.slotNames[slot] ?? slot,

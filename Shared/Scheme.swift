@@ -70,10 +70,13 @@ enum SchemeStore {
 
     static func defaults() -> [String: Scheme] {
         [
+            /* dual1 默认 = Kona (系统内置 Eloquence/ViaVoice): 同一发音人 Eddy
+             * 的中文+英文两侧 — 复刻 VVTTS 的 0=中文/1=英文 双音库模式,
+             * 且零物料依赖 (见 NOTES-vvtts.md 第十三节)。 */
             "dual1": Scheme(
-                primary: SchemeVoiceConfig(engine: "naturalvoice", autoLocale: "zh-CN"),
-                secondary: SchemeVoiceConfig(engine: "onecore", autoLocale: "en-US"),
-                label: "晓晓 HD + 英文 (OneCore)"),
+                primary: SchemeVoiceConfig(engine: "kona", voice: "eddy-zh", autoLocale: "zh-CN"),
+                secondary: SchemeVoiceConfig(engine: "kona", voice: "eddy-en", autoLocale: "en-US"),
+                label: "Eddy 中文 + 英文 (Kona)"),
             "dual2": Scheme(
                 primary: SchemeVoiceConfig(engine: "yongde", autoLocale: "zh-CN"),
                 secondary: SchemeVoiceConfig(engine: "onecore", autoLocale: "en-US"),

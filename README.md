@@ -12,6 +12,7 @@ TTS 引擎注册为系统语音（VoiceOver / 朗读内容 / `say` 均可用）�
 | 永德·语音0 ~ 语音4 | `yongde` | 逆向复刻拼接引擎（槽位编码 + 5 个 .vl 音色库） | zh-CN | 16 kHz |
 | 自然语音·晓晓 HD / 晓臻 / 云哲 | `naturalvoice` | 微软嵌入式神经网络（流式） | zh-CN / zh-TW | 24 kHz |
 | OneCore·晓晓 HD / Andrew HD / Ava HD / Eric / Michelle | `onecore` | 微软嵌入式神经网络（流式） | zh-CN / en-US | 24 kHz |
+| Eddy/Flo/奶奶/爷爷/Reed/Rocko/Sandy/Shelley × 中英 (Kona) | `kona` | **系统内置 Eloquence/ViaVoice 直驱**（进程内，零物料依赖） | zh-CN / en-US | 16 kHz |
 
 - 永德：`voices/` 下每个 `ydvoiceNN.vl` 就是一个发音人，首次使用某发音人时加载；
 - MS 引擎：`model/` 下每个含 `SynthModel.license` 的包 = 一个发音人（懒建会话）。
@@ -127,7 +128,7 @@ clang -std=c11 -IBridge/include -o /tmp/mtts_cli scripts/test_cli.c Bridge/*.c -
 MT_ENGINES="$HOME/Library/Containers/com.magictts.voices.synth/Data/Engines" \
   /tmp/mtts_cli yongde "中东西通红龙用"
 say -v '永德·语音0' "中东西通红龙用"
-say -v '双语方案·一' "中文与English混读，NVDA version 3.14，字母Z分组。"
+say -v '双语方案·一' "中文与English混读，NVDA version 3.14，字母Z分组。"   # 默认方案 = Eddy 中文+英文 (Kona)
 ```
 
 调试转储**默认关闭**（正式路径零磁盘 IO）。需要引擎侧 WAV 比对时：

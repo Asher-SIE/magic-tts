@@ -34,21 +34,26 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static const mtts_engine_desc kEngineTable[] = {
     /* key             voice_name    identifier                   locale  引擎库                                采样率 */
+    { "kona",          "Kona",       "com.magictts.kona",         "zh-CN", "(系统内置)",                          16000 },
     { "yongde",        "永德",       "com.magictts.yongde",       "zh-CN", "libyongde_tts.dylib",                16000 },
     { "naturalvoice",  "自然语音",   "com.magictts.naturalvoice", "zh-CN", "libMicrosoft.CognitiveServices.Speech.core.dylib", 24000 },
     { "onecore",       "OneCore",    "com.magictts.onecore",      "zh-CN", "libMicrosoft.CognitiveServices.Speech.core.dylib", 24000 },
 };
 #define TABLE_LEN ((int)(sizeof(kEngineTable) / sizeof(kEngineTable[0])))
+#define MTTS_ENGINE_TABLE_MAX 4
+/* 表长若超过槽位数需同步放大 MTTS_MAX_ENGINES (当前 4=满) */
 
 /* —— 适配器入口 (各 adapter 文件) —— */
 const mtts_adapter_if *mtts_yongde_adapter(void);   /* yongde_adapter.c (复刻, 无引擎库) */
 const mtts_adapter_if *mtts_ms_adapter(void);       /* ms_embedded_adapter.c (naturalvoice + onecore) */
+const mtts_adapter_if *mtts_kona_adapter(void);     /* kona_adapter.m (系统 Eloquence, 见 NOTES-vvtts 十三) */
 
 const mtts_adapter_if *mtts_adapter_for(const char *key) {
     if (!key) return NULL;
     if (strcmp(key, "yongde") == 0) return mtts_yongde_adapter();
     if (strcmp(key, "naturalvoice") == 0 || strcmp(key, "onecore") == 0)
         return mtts_ms_adapter();
+    if (strcmp(key, "kona") == 0) return mtts_kona_adapter();
     return NULL;
 }
 

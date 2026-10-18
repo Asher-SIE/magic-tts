@@ -19,6 +19,10 @@ mkdir -p "$OUT/obj"
 for f in Bridge/*.c; do
     clang -c -std=c11 -fPIC -mmacosx-version-min=14.0 -IBridge/include "$f" -o "$OUT/obj/$(basename "${f%.c}").o"
 done
+# ObjC 适配器 (kona_adapter.m → AVSpeechSynthesizer) 需 ARC + AVFAudio
+for f in Bridge/*.m; do
+    clang -c -fobjc-arc -fPIC -mmacosx-version-min=14.0 -IBridge/include "$f" -o "$OUT/obj/$(basename "${f%.m}").o"
+done
 
 # —— Audio Unit 扩展 (MagicTTSSynth): 无 main, 入口 = libextension 的 _NSExtensionMain ——
 xcrun --sdk macosx swiftc -swift-version 5 \

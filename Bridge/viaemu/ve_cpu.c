@@ -336,6 +336,116 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
                 ve_log("PHN-LOOP @fc6d ebp=0x%08x [ebp-0x4c]=0x%08x idx16=%u eax=%u",
                        c->reg[5], obj, (obj > 0x400000u && obj < 0x3F800000u) ? M16(obj + 0xe) : 0xFFFF, c->reg[0]);
             }
+            if (c->eip == 0x1c17108du) {   /* getObject: new(0x14) 返回 */
+                ve_log("GETOBJ-NEW eax=0x%08x", c->reg[0]);
+            }
+            if (c->eip == 0x1c17109cu) {   /* getObject: wrapper ctor 返回 */
+                ve_log("GETOBJ-CTOR eax=0x%08x slot_ptr=0x%08x *slot=0x%08x",
+                       c->reg[0], c->reg[6], c->reg[6] > 0x400000u ? M32(c->reg[6]) : 0);
+            }
+            if (c->eip == 0x1c17107fu) {   /* chs50 getObject: 单例字段判定 */
+                ve_log("GETOBJ-SINGLETON [0x1c1dbb7c]=0x%08x eax=0x%08x",
+                       M32(0x1c1dbb7c), c->reg[0]);
+            }
+            if (c->eip == 0x1c17105bu) {   /* 静态初始化 0x10184800 完成后 */
+                ve_log("GETOBJ-STATIC-INIT [0x1c1dbb78]=0x%08x [0x1c1dbb7c]=0x%08x flag=0x%02x",
+                       M32(0x1c1dbb78), M32(0x1c1dbb7c), M8(0x1c1dbb80));
+            }
+            {   /* 核心装配 0x10185c80 各子调用返回点 */
+                static const uint32_t kp[] = {0x1c185c94u, 0x1c185d06u, 0x1c185d69u,
+                                              0x1c185d8eu, 0x1c185db3u, 0x1c185dd8u,
+                                              0x1c185dfdu, 0x1c185e15u, 0x1c185e2du,
+                                              0x1c185e45u, 0x1c185e59u, 0x1c185e6du,
+                                              0x1c185e7au, 0x1c185e87u, 0x1c185e96u,
+                                              0x1c185ea3u};
+                for (unsigned q = 0; q < sizeof(kp) / sizeof(kp[0]); q++)
+                    if (c->eip == kp[q]) {
+                        ve_log("CORE-SUB[%u] ret=0x%08x", q, c->reg[0]);
+                        break;
+                    }
+            }
+            if (c->eip == 0x1c185956u) {   /* call [0x10189134] 传输检查 */
+                ve_log("TRNS-CHK slot=0x%08x target=0x%08x name=\"%s\"",
+                       0x1c189134, M32(0x1c189134), (char *)GADDR(c->reg[0]));
+            }
+            if (c->eip == 0x1c18595fu) {   /* 传输检查返回 */
+                ve_log("TRNS-CHK-RET ret=0x%08x out=0x%08x", c->reg[0], M32(c->reg[4] + 0x40));
+            }
+            if (c->eip == 0x1c187120u) {   /* 0x10187120 传输创建入口 */
+                ve_log("TRNS-CREATE a1=\"%s\" a2=0x%08x a3=0x%08x",
+                       (char *)GADDR(M32(c->reg[4] + 4)), M32(c->reg[4] + 8), M32(c->reg[4] + 0xc));
+            }
+            if (c->eip == 0x1c1864e3u) {   /* [cfg+0x16] type-1 路径调用 */
+                uint32_t cb = M32(c->reg[2] + 0x16);
+                ve_log("CHN-CB1 target=0x%08x", cb);
+            }
+            if (c->eip == 0x1c1864a0u) {   /* [cfg+0x16] 通道打开回调 (type-2) */
+                uint32_t cb = M32(c->reg[1] + 0x16);
+                ve_log("CHN-OPEN-CB target=0x%08x cfg=0x%08x", cb, c->reg[1]);
+            }
+            if (c->eip == 0x1c1864a3u) {   /* [cfg+0x16] 回调返回 */
+                ve_log("CHN-CB-RET ret=0x%08x", c->reg[0]);
+            }
+            if (c->eip == 0x1c1870fbu) {   /* 通道创建: 工厂结果判定 */
+                ve_log("CHN-FACT [esi+0x24]=0x%08x esi=0x%08x",
+                       M32(c->reg[6] + 0x24), c->reg[6]);
+            }
+            if (c->eip == 0x1c1870e4u) {   /* 已有对象路径 0x10184c40 调用前 */
+                ve_log("CHN-REATTACH [esi+0x24]=0x%08x", M32(c->reg[6] + 0x24));
+            }
+            if (c->eip == 0x1c186ff8u) {   /* 通道创建: 读通道表状态 */
+                uint32_t cfg = c->reg[1];
+                if (cfg > 0x400000u && cfg < 0x3F800000u) {
+                    uint32_t tbl = M32(cfg + 6), cnt = M32(cfg + 0xa);
+                    static int s_dump = 0;
+                    if (s_dump < 2) {
+                        s_dump++;
+                        for (uint32_t q = 0; q < cnt && q < 12; q++) {
+                            uint32_t e = tbl + q * 0x2c;
+                            ve_log("CHN-DUMP[%u] @0x%08x \"%s\" type=%u +0x18=0x%08x",
+                                   q, e, (char *)GADDR(e), M32(e + 0x14), M32(e + 0x18));
+                        }
+                    }
+                    ve_log("CHN-TBL cfg=0x%08x count=%u table=0x%08x",
+                           cfg, cnt, tbl);
+                }
+            }
+            if (c->eip == 0x1c176d17u) {   /* voice-setup: 0x10185c80 返回 */
+                ve_log("VS-CORE ret=0x%08x", c->reg[0]);
+            }
+            if (c->eip == 0x1c176d24u) {   /* voice-setup: 0x10177550 返回 */
+                ve_log("VS-CORE2 ret=0x%08x", c->reg[0]);
+            }
+            if (c->eip == 0x1c17110eu) {   /* worker: 0x10170a20(esi) 返回 */
+                ve_log("W-A7020 ret=0x%08x", c->reg[0]);
+            }
+            if (c->eip == 0x1c171119u) {   /* worker: 0x10023b24(esi) 返回 */
+                ve_log("W-B3b24 ret=0x%08x", c->reg[0]);
+            }
+            if (c->eip == 0x1c17110cu) {   /* worker: voice-setup 后 test eax */
+                ve_log("W-VS ret=0x%08x", c->reg[0]);
+            }
+            if (c->eip == 0x2400e536u) {   /* 引擎虚表+0xc 调用返回: 非0=失败清理 */
+                uint32_t eng = M32(M32(c->reg[5] - 0x20) + 0xc);
+                ve_log("ENG-VT0C eng=0x%08x vt=0x%08x vt+0xc=0x%08x ret=%d",
+                       eng, eng > 0x400000u ? M32(eng) : 0,
+                       (eng > 0x400000u && M32(eng) > 0x400000u) ? M32(M32(eng) + 0xc) : 0,
+                       (int32_t)c->reg[0]);
+            }
+            if (c->eip == 0x2400e784u) {   /* e75d: eax=[entry+0xC] 引擎字段 */
+                ve_log("E75D-ENG [+0xC]=0x%08x", c->reg[0]);
+            }
+            if (c->eip == 0x2400e6b7u) {   /* e681②: e7fa(Path) 返回判定 */
+                uint32_t s = M32(c->reg[5] - 0x14);
+                ve_log("E681-PATH ret=0x%08x \"%s\"", s,
+                       (s > 0x400000u && s < 0x3F800000u) ? (char *)GADDR(s) : "?");
+            }
+            if (c->eip == 0x2400e709u) {   /* e681③: 包装 entry 判定 */
+                ve_log("E681-ENTRY ret=0x%08x", M32(c->reg[5] - 0x10));
+            }
+            if (c->eip == 0x2400e778u) {   /* e75d: e681 结果判定 */
+                ve_log("E75D-RES ret=0x%08x", M32(c->reg[5] - 4));
+            }
             if (c->eip == 0x2400dab9u) {   /* d8b7 的 -14 返回点 */
                 ve_log("D8B7-FAIL-RET this+0x54=0x%08x", M32(M32(c->reg[5] - 0x58) + 0x54));
             }
@@ -457,7 +567,8 @@ uint32_t ve_cpu_run(VeCPU *c, uint32_t stop_esp) {
                    c->eip, c->reg[4], M32(c->reg[4]), M32(c->reg[4] + 4));
             return 5;
         }
-        if (trace && budget <= 3000) {
+        if (trace && (budget <= 3000 ||
+                      (c->eip >= 0x1c186300u && c->eip < 0x1c188600u))) {   /* 通道子系统全息 */
             ve_log("TRACE %3llu eip=0x%08x esp=0x%08x bytes=%02x %02x %02x %02x %02x %02x eax=%08x ecx=%08x",
                    (unsigned long long)budget, c->eip, c->reg[4],
                    M8(c->eip), M8(c->eip + 1), M8(c->eip + 2),

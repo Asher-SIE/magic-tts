@@ -262,3 +262,105 @@ get/close ~20 个, chs50.syn 数据文件读取疑似走它) + torrent→ibmcmm 
   -lpthread -framework CoreFoundation
 - 关键探针 (ve_cpu.c probe 块): D8B7-A/B(枚举) D8B7-CHK/FAIL-RET ENGOBJ-ERR
   ERRSRC-A/B VS-ENTRY/VS-JLE PHN-LOAD/PHN-FLOW SSCANF/SPRINTF/STRTOK 定点日志.
+
+## 十三、第九轮后的方向转折：macOS 内置 Eloquence ("Kona") 调研 (2026-10-18)
+
+**结论先行**: macOS 自带的 Eloquence 发音人 (Eddy/Flo/Grandma/Grandpa/Reed/Rocko/Sandy/Shelley)
+不是"另一个相似引擎"，而是 **IBM ViaVoice/Eloquence 血统引擎的原生 arm64 移植**，
+每个发声人带 14 个语言变体 —— 含 zh_CN/zh_TW。`say -v "Eddy (中文（中国大陆）)"` 直接出声
+(22050Hz, 实测 RMS 2310, ~100x 实时)。
+
+### 实现方式全图 (本机 macOS 26 实测)
+- 管道: say/AVSpeech → TextToSpeech.framework (Swift, TTSExecutor 队列) → XPC/AU
+- 引擎: `/System/Library/PrivateFrameworks/TextToSpeechKonaSupport.framework/Frameworks/`
+  14 个语言 dylib: enu eng deu esp esm fra frc ita fin jpn kor ptb **chs cht**
+  - 磁盘上该目录为空壳，实体在 dyld 共享缓存 (dlopen 按安装名即可加载)
+  - **符号未剥离**: chs.dylib 7056 symtab / 2136+ external
+- 血统铁证 (chs.dylib 导出):
+  - `getObject` 工厂 —— 与 APK chs50.syn 同名同 ABI (viaemu 里我们调的就是它)
+  - `eloqc_new/eloqc_delete` (Eloquence C 运行时)
+  - `EngineWrapper` C++ 类 (COM 风格: vt[0]=queryInterface vt[3]=start vt[5]=processSentences
+    vt[11]=flush vt[17]=setSynthToCallback vt[19]=setKlattConstHook vt[28]=close …全解码)
+  - `DeltaProc_*` 文本前端 (registerLanguages/main/process_sentences…) + `Klatt*` 合成核
+    (KlattOpen/KlattSynth/KlattSetConstParms) + `eciLink*`
+  - Resources: `KonaVoicePresets.plist` —— eciVoiceNumber/pitchBase/headSize/breathiness/
+    roughness/vocalTract = ECI 参数体系; `chtvoice.sapi.txt` = GBK 编码 \Vce=/\Spd= 演示稿
+- 版本: version.plist ProjectName=AccessibilitySpeechEngines BuildVersion=129
+
+### "换我们的数据" 判定: 不可行
+- 语言数据与代码一起编译进 code-signed SIP 共享缓存 dylib，无任何外置数据文件
+  (对照: Vocalizer ('purr', Li-Mu 等) 有 SpeechBase/Voices/*.SpeechVoice 数据包,
+  Eloquence/Kona 没有)
+- 不动 SIP/不重签名就无替换点; APK 的 chs50.syn 数据 (i386 PE) 也无对应加载通道
+
+### 直驱实验进展 (/tmp/kona_drv*.c, 已验证到最后一哩)
+- dlopen chs.dylib ✓ → getObject(2,&obj) ✓ (rc=1) → EngineWrapper vtable 全解析 ✓
+- setSynthToCallback/start/processSentences/flush/end 无崩溃跑通, 但回调零次 (无音频)
+- enu 的 processSentences 在 pc=0 崩 (内部函数表未接线) → 缺宿主侧初始化
+- ibmeci.dll 0x1000e45e 反汇编: getObject 后须连调 表+0xc (须返回非零) / 表+0x68 / 表+0x8;
+  我们的调用序缺这些 (苹果版 vtable 布局又与 i386 版不同)
+- `DeltaProc_registerLanguages()` 裸调即崩 (需参数/上下文)
+- 突破口: 反汇编 TextToSpeech Swift 胶水 (say 采样定位到 load+0x626a5 等) 或试
+  DeltaProc ABI —— 有界但需半天到一天
+
+### 对项目路线的影响
+- VVTTS 中文音色若与 Apple chs 同源 (极可能), "还原 VVTTS 听感" ≈ 调参数而非搬数据:
+  试听样本 VVTTS/sample_eddy_zh.aiff; KonaVoicePresets 的 pitchBase/speed 等可调
+- MagicTTS 集成最优解排序:
+  1) 系统已自带该声音 → MagicTTS 可只做路由/包装 (甚至无需自研引擎)
+  2) 直驱 chs.dylib (私有 API, 需攻克初始化序列) → 参数级控制
+  3) viaemu (备胎, 全控制但 5-15 MIPS 性能风险)
+
+## 十四、第十轮：直驱 AXKonaSpeechEngine — MagicTTS 集成完成 (2026-10-18)
+
+**结果**: `Bridge/kona_adapter.m` 进程内直驱系统 Kona 引擎, 双语方案 (双语方案·一 =
+Eddy 中文+英文) 在 appex 内经 `say` 验证出声 (8.09s, peak 19204, 三段 中→英→中)。
+
+### 路径排除记录 (全部实测)
+1. **AVSpeechSynthesizer.write 在语音提供者 appex 内被系统拒绝**: 沙盒内 197 个发音人
+   可枚举、voiceWithIdentifier OK, 但 writeUtterance 回调永不到达 (main/自泵线程双路
+   6s 超时)。CLI 同代码正常 → 是对 speech-provider 扩展的合成服务限制, 无解。
+2. **macOS 26 所有常规合成路径都走 XPC**: say/AVS/NSSpeechSynthesizer/Carbon 的合成
+   实际发生在 `KonaSynthesizer.appex` (ExtensionKit, /System/iOSSupport/...) 进程内
+   (96% CPU 实测); say 进程内映射的 Kona dylib 是 `unused` (仅枚举预载)。
+   SpeechSynthesisServerXPC 只是代理。
+3. **DYLD_INSERT 注入追踪不可行**: dyld4 对插入库自身镜像也 interpose (r_dlopen 解析
+   成自己 → 无限递归栈溢出, +load 也救不了); 系统进程 SIP 剥离 DYLD_*。
+
+### 直驱配方 (最终, /tmp/ax_test.m 可复现)
+```
+dlopen(".../TextToSpeechKonaSupport.framework/TextToSpeechKonaSupport")  # 缓存镜像
+engine = [[AXKonaSpeechEngine alloc] initWithVoice:voice]   # voice 来自 +allVoices
+[engine setParameters:p]        # AXKonaParameters, 8 属性全 NSInteger — 必须整数直传!
+[engine synthesizeText:文本]     # 同步合成, 毫秒级返回
+while (kb = [engine nextBuffer]) { pcm += kb.buffer; }       # AXKonaBuffer→AVAudioPCMBuffer
+```
+三个关键坑:
+- **不要手动 setOutputFormat** (自建 AVAudioConverter 会静默产出 0 帧 buffer);
+  用引擎默认 engineFormat (16k Int16)。
+- **AXKonaParameters 属性是 NSInteger**: performSelector withObject:@(50) 传的是
+  NSNumber 指针值 → 巨大垃圾值 → 合成截断 0.2s。用 objc_msgSend 整数直传。
+- **不注入 volume 参数则输出 ~1/40 幅度** (peak 823 vs 19841) — KonaVoicePresits
+  的 volume (90-95) 必须带上。预设全表已录入适配器 (Eddy eci=9 pitch=69 …)。
+
+### 对象模型 (KonaSupport 缓存二进制内, ObjC 运行时可枚举)
+AXKonaSpeechEngine (synthesizeText/nextBuffer/cancelSynthesis/klatt hooks/
+eciCallback:iParam:instanceData:) + AXKonaVoice (allVoices 112=8人×14语言) +
+AXKonaParameters (speed/volume/pitchBase/fluct/breath/rough/headSize/tract) +
+AXKonaConfiguration (dylib=chs dialectCode=6.0 encoding=GB18030 iniString=[6.0]) +
+AXKonaBuffer (buffer=AVAudioPCMBuffer, markers)。
+
+### 调用链实锚 (KonaSynthesizer.appex 96%CPU 采样)
+ETIThread::execute (eci.dylib) → ETImessage::process → SynthThread::addTextToEngine →
+EngineWrapper::processSentences → engsynProcessSentences → DeltaProc_process_sentences →
+process_input → apply_rules → run_speech_module → generate_acoustic_vals →
+synthesizeRange → synthesize → sendArrayParameters → -[AXKonaSpeechEngine
+klattDynamicHook:] — 即引擎常驻消息线程 + Klatt 钩子回调, 宿主类就是 AXKonaSpeechEngine。
+
+### 引擎层逆向沉淀 (chs.dylib, 备将来绕过 ObjC 层用)
+getObject(1/2)=新建 EngineWrapper(license 校验) / getObject(3)=RequestLicense 单例;
+wrapper+0x10=delta 会话 (delta_new 于构造); delta+0xe0=256B 链路缓冲 (ecilink_new
+填函数表, 空 3 槽=事件回调) / +0xe8=eciLinkNew() 数据通道 (文本经 eciLinkDataFromECI
+入引擎); engsynStart→etiwinMainDLL→vcmdinit→initializeIO→DeltaProc_start; 返回值=
+checkEngsynError (link+0xd8 错误码, **0=成功**); engsynFlush(0)→engsynRestart 触发;
+无工作线程 — 全靠宿主泵 (eci.dylib 的 ETI 消息线程即官方泵)。
