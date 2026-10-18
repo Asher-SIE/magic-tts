@@ -133,23 +133,34 @@ enum EngineRegistry {
     static let schemePreviewText = "方案试听：中文与 English mixed reading，NVDA 发布会 at 3 点，字母 Z 分组，圆周率 3.14。"
 
     /// 方案试听: 与 appex 渲染同一条分发链 (切段 → 逐段桥合成 → 重采样 24k 拼接,
-    /// 各段带方案音量增益) → AVAudioPlayer 播放。
+    /// 各段带方案音量增益; 单语音模式归主侧重并, 孤立大写字母段带音高增量)
+    /// → AVAudioPlayer 播放。
     static func previewScheme(_ scheme: Scheme) {
         // 与 appex 同链: 先过朗读替换规则 (方案开关), 再切段
         let text = scheme.useRules ? RuleStore.shared().apply(schemePreviewText) : schemePreviewText
-        let segs = TextSegmenter.segment(text, options: scheme.rules)
+        var segs = TextSegmenter.segment(text, options: scheme.rules)
+        if !scheme.useSecondary {
+            segs = TextSegmenter.coalesce(segs.map {
+                TextSegment(text: $0.text, target: .primary, isolatedCapital: $0.isolatedCapital)
+            })
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             _ = mtts_global_scan(MagicPaths.enginesRoot.path)
             let outRate: Double = 24000
+            // resolve 依赖 scan 结果, 须在 scan 后 (与 appex 顺序一致)
+            let p = SchemeStore.resolve(scheme.primary)
+            let s = scheme.useSecondary ? SchemeStore.resolve(scheme.secondary) : p
             var pcm: [Float] = []
             for seg in segs {
-                let isPrimary = seg.target == .primary
+                let isPrimary = !scheme.useSecondary || seg.target == .primary
                 let side = isPrimary ? scheme.primary : scheme.secondary
-                let (engine, voice) = SchemeStore.resolve(side)
+                let r = isPrimary ? p : s
+                var pitch = side.pitch
+                if seg.isolatedCapital { pitch = min(100, pitch + LetterCaseStyle.pitchDelta) }
                 var sr: Int32 = 24000
-                guard let st = mtts_stream_start(engine, voice, seg.text,
-                                                 Int32(side.rate), Int32(side.pitch), &sr) else {
-                    NSLog("[MagicTTS] 方案试听: 第 %d 段合成失败 (%@)", pcm.count, engine)
+                guard let st = mtts_stream_start(r.engine, r.voice, seg.text,
+                                                 Int32(side.rate), Int32(pitch), &sr) else {
+                    NSLog("[MagicTTS] 方案试听: 第 %d 段合成失败 (%@)", pcm.count, r.engine)
                     continue
                 }
                 defer { mtts_stream_free(st) }

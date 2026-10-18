@@ -30,14 +30,14 @@ struct VoiceOption: Identifiable, Hashable {
     var id: String { engine + "|" + key }
 }
 
-/// 双语方案卡片: 系统槽位名固定, 实际映射即时热改 (scheme.json, 请求时读取)。
-struct SchemeCard: View {
+/// 方案列表行: 名称 + 两侧发音人/参数摘要。
+struct SchemeRow: View {
     let slot: String
-    @State var scheme: Scheme
+    let scheme: Scheme
     let voices: [VoiceOption]
-    var onSave: (Scheme) -> Void
-
-    @State private var editing = false
+    var selected: Bool = false
+    var onTap: () -> Void = {}
+    var onDoubleTap: () -> Void = {}
 
     private func sideDesc(_ c: SchemeVoiceConfig) -> String {
         if let hit = voices.first(where: { $0.engine == c.engine && $0.key == c.voice && !c.voice.isEmpty }) {
@@ -47,91 +47,135 @@ struct SchemeCard: View {
     }
 
     var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("\(SchemeStore.slotNames[slot] ?? slot)\(scheme.label.isEmpty ? "" : " — \(scheme.label)")")
+        VStack(alignment: .leading, spacing: 2) {
+            Text(scheme.label.isEmpty ? (SchemeStore.slotNames[slot] ?? slot) : scheme.label)
+            if scheme.useSecondary {
                 Text("中文: \(sideDesc(scheme.primary))    英文: \(sideDesc(scheme.secondary))")
                     .font(.caption).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle)
                 Text("语速 \(scheme.primary.rate)%/\(scheme.secondary.rate)%  音量 \(scheme.primary.volume)%/\(scheme.secondary.volume)%")
                     .font(.caption2).foregroundStyle(.tertiary)
-            }
-            Spacer()
-            Button("试听") { EngineRegistry.previewScheme(scheme) }
-            Button("编辑") { editing = true }
-        }
-        .padding(.vertical, 1)
-        .sheet(isPresented: $editing) {
-            SchemeEditor(scheme: scheme, voices: voices) { updated in
-                scheme = updated
-                onSave(updated)
-                editing = false
+            } else {
+                Text("引擎: \(sideDesc(scheme.primary))")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+                Text("语速 \(scheme.primary.rate)%  音量 \(scheme.primary.volume)%")
+                    .font(.caption2).foregroundStyle(.tertiary)
             }
         }
+        .padding(.vertical, 6).padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(selected ? Color.accentColor.opacity(0.15) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 6))
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2, perform: onDoubleTap)
+        .onTapGesture(count: 1, perform: onTap)
     }
 }
 
-/// 方案编辑: 主/副发音人 + 各自语速/音高/音量 + 分发规则。
-struct SchemeEditor: View {
-    @State var scheme: Scheme
-    let voices: [VoiceOption]
-    var onSave: (Scheme) -> Void
+/// 编辑器打开状态: 槽位 + 方案草稿 (新增时预分配空闲槽位, 保存才落盘)。
+struct SchemeEditDraft: Identifiable {
+    let slot: String
+    let scheme: Scheme
+    let isNew: Bool
+    var id: String { slot }
+}
 
+/// 方案编辑: 名称 / 主要引擎与参数 (含大小写字母处理) / 第二语音开关与引擎 /
+/// 分发规则; 试听随时按面板当前参数预览。
+struct SchemeEditor: View {
+    let draft: SchemeEditDraft
+    let voices: [VoiceOption]
+    var onSave: (String, Scheme) -> Void
+
+    @State private var scheme: Scheme
     @State private var primarySel = ""
     @State private var secondarySel = ""
     @Environment(\.dismiss) private var dismiss
 
+    init(draft: SchemeEditDraft, voices: [VoiceOption],
+         onSave: @escaping (String, Scheme) -> Void) {
+        self.draft = draft
+        self.voices = voices
+        self.onSave = onSave
+        _scheme = State(initialValue: draft.scheme)
+    }
+
+    /// 面板当前状态 (选择器已套用) — 试听与保存都用它
+    private var previewing: Scheme {
+        var s = scheme
+        applyPicker(primarySel, into: &s.primary)
+        applyPicker(secondarySel, into: &s.secondary)
+        return s
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("编辑方案").font(.title3.bold())
+            Text(draft.isNew ? "新增方案" : "编辑方案").font(.title3.bold())
 
             Form {
-                TextField("备注", text: $scheme.label)
-
-                Picker("中文发音人", selection: $primarySel) {
-                    ForEach(voices) { v in Text(v.label).tag(v.id) }
-                }
-                Picker("英文发音人", selection: $secondarySel) {
-                    ForEach(voices) { v in Text(v.label).tag(v.id) }
-                }
-
-                sideSection("中文侧参数", $scheme.primary)
-                sideSection("英文侧参数", $scheme.secondary)
-
-                Section("分发规则") {
+                Section("方案") {
+                    TextField("方案名称", text: $scheme.label)
                     Toggle("应用朗读替换规则 (全局 rules.json)", isOn: $scheme.useRules)
-                    Toggle("孤立字母归中文侧 (如 “Z 分组”)", isOn: $scheme.rules.isolatedLetterToPrimary)
-                    Toggle("数字归中文侧", isOn: $scheme.rules.digitsToPrimary)
-                    Stepper("英文最少词数: \(scheme.rules.englishMinWords)",
-                            value: $scheme.rules.englishMinWords, in: 1...3)
+                }
+
+                Section("主要引擎") {
+                    Picker("发音人", selection: $primarySel) {
+                        ForEach(voices) { v in Text(v.label).tag(v.id) }
+                    }
+                    sideParams($scheme.primary)
+                    Picker("大小写字母处理", selection: $scheme.rules.letterCase) {
+                        Text("无").tag(LetterCaseStyle.none)
+                        Text("前缀「大写」").tag(LetterCaseStyle.prefixZh)
+                        Text("前缀「Capital」").tag(LetterCaseStyle.prefixEn)
+                        Text("提高音高").tag(LetterCaseStyle.pitch)
+                    }
+                }
+
+                Section("第二语音") {
+                    Toggle("启用第二语音", isOn: $scheme.useSecondary)
+                    if scheme.useSecondary {
+                        Picker("发音人", selection: $secondarySel) {
+                            ForEach(voices) { v in Text(v.label).tag(v.id) }
+                        }
+                        sideParams($scheme.secondary)
+                    }
+                }
+
+                if scheme.useSecondary {
+                    Section("分发规则") {
+                        Toggle("孤立字母归中文侧 (如 “Z 分组”)", isOn: $scheme.rules.isolatedLetterToPrimary)
+                        Toggle("数字归中文侧", isOn: $scheme.rules.digitsToPrimary)
+                        Stepper("英文最少词数: \(scheme.rules.englishMinWords)",
+                                value: $scheme.rules.englishMinWords, in: 1...3)
+                    }
                 }
             }
             .formStyle(.grouped)
 
             HStack {
-                Text("方案在系统里以固定名称注册（双语方案·一/二），修改后立即生效，无需重装。")
-                    .font(.caption2).foregroundStyle(.secondary)
+                Button("试听") { EngineRegistry.previewScheme(previewing) }
                 Spacer()
                 Button("取消") { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button("保存") {
-                    applyPicker(primarySel, into: &scheme.primary)
-                    applyPicker(secondarySel, into: &scheme.secondary)
-                    onSave(scheme)
+                    let s = previewing
+                    onSave(draft.slot, s)
+                    dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
             }
         }
         .padding(16)
-        .frame(width: 460, height: 560)
+        .frame(width: 480, height: 640)
         .onAppear {
             primarySel = selId(scheme.primary)
             secondarySel = selId(scheme.secondary)
         }
     }
 
-    private func sideSection(_ title: String, _ side: Binding<SchemeVoiceConfig>) -> some View {
-        Section(title) {
+    private func sideParams(_ side: Binding<SchemeVoiceConfig>) -> some View {
+        Group {
             HStack {
                 Text("语速 \(side.wrappedValue.rate)%")
                 Slider(value: Binding(
@@ -168,7 +212,10 @@ struct SchemeEditor: View {
 struct ContentView: View {
     @State private var engines: [EngineStatus] = []
     @State private var schemes: [String: Scheme] = [:]
+    @State private var selectedSlot: String?
     @State private var showRules = false
+    @State private var editing: SchemeEditDraft?
+    @State private var confirmDelete = false
 
     /// 全引擎发音人拍平 (方案编辑用), 每引擎的"自动"项排在该引擎发音人之前
     private var voiceOptions: [VoiceOption] {
@@ -182,31 +229,28 @@ struct ContentView: View {
         return out
     }
 
+    private var orderedSlots: [String] {
+        SchemeStore.slots.filter { schemes[$0] != nil }
+    }
+
+    private var freeSlot: String? {
+        SchemeStore.slots.first { schemes[$0] == nil }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Magic TTS")
                 .font(.title2.bold())
 
-            Text("引擎物料目录: \(MagicPaths.enginesRoot.path)")
-                .font(.caption).foregroundStyle(.secondary)
-                .textSelection(.enabled)
+            schemePanel
+
+            HStack {
+                Button("朗读替换规则…") { showRules = true }
+                Button("刷新语音列表") { reload() }
+                Spacer()
+            }
 
             List {
-                Section("语音方案 (中英自动分发)") {
-                    ForEach(SchemeStore.slots, id: \.self) { slot in
-                        if let scheme = schemes[slot] {
-                            SchemeCard(slot: slot, scheme: scheme, voices: voiceOptions) { updated in
-                                schemes[slot] = updated
-                                var all = SchemeStore.loadAll()
-                                all[slot] = updated
-                                try? SchemeStore.save(all)
-                            }
-                        }
-                    }
-                    Text("VoiceOver/系统声音里选「双语方案·一/二」即可；中文段与英文段自动分派给两侧发音人，语速/音高/音量由 MagicTTS 托管。")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-
                 ForEach(engines) { e in
                     Section("\(e.name) · \(e.mode)") {
                         ForEach(e.voices) { v in
@@ -219,31 +263,115 @@ struct ContentView: View {
                     }
                 }
             }
-            .frame(minHeight: 320)
+            .frame(minHeight: 200)
             .listStyle(.inset)
-
-            Text("每个引擎的全部发音人都会注册为系统语音；永德 = voices/ 下每个 .vl，微软引擎 = model/ 下每个含 SynthModel.license 的语音包。安装新物料后点刷新。")
-                .font(.caption2).foregroundStyle(.secondary)
-
-            HStack {
-                Button("朗读替换规则…") { showRules = true }
-                Button("刷新语音列表") {
-                    engines = EngineRegistry.engines()
-                    schemes = SchemeStore.loadAll()
-                    EngineRegistry.refreshVoices()
-                }
-                Spacer()
-                Text("系统设置 → 辅助功能 → 朗读内容 → 系统声音；或 VoiceOver 实用工具 → 语音 → 添加声音")
-                    .font(.caption2).foregroundStyle(.secondary)
-            }
         }
         .padding(16)
-        .frame(minWidth: 760, minHeight: 460)
+        .frame(minWidth: 760, minHeight: 480)
         .sheet(isPresented: $showRules) { RulesView() }
-        .onAppear {
-            engines = EngineRegistry.engines()
-            schemes = SchemeStore.loadAll()
-            EngineRegistry.refreshVoices()
+        .sheet(item: $editing) { draft in
+            SchemeEditor(draft: draft, voices: voiceOptions) { slot, scheme in
+                saveScheme(scheme, slot: slot)
+            }
         }
+        .confirmationDialog("删除所选方案？", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("删除", role: .destructive) { deleteSelected() }
+            Button("取消", role: .cancel) {}
+        }
+        .onAppear { reload() }
+    }
+
+    /// 上方方案区: 左列表 (单击选中, 双击编辑) + 右侧管理按钮
+    private var schemePanel: some View {
+        HStack(alignment: .top, spacing: 12) {
+            ScrollView {
+                VStack(spacing: 0) {
+                    if orderedSlots.isEmpty {
+                        Text("暂无方案，点「新增」创建。")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                    }
+                    ForEach(orderedSlots, id: \.self) { slot in
+                        SchemeRow(slot: slot, scheme: schemes[slot]!, voices: voiceOptions,
+                                  selected: selectedSlot == slot,
+                                  onTap: { selectedSlot = slot },
+                                  onDoubleTap: { openEditor(slot) })
+                    }
+                }
+            }
+            .frame(minHeight: 96, maxHeight: 176)
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary, lineWidth: 1))
+
+            VStack(spacing: 8) {
+                Button("新增") {
+                    guard let slot = freeSlot else { return }
+                    editing = SchemeEditDraft(slot: slot, scheme: newScheme(), isNew: true)
+                }
+                .disabled(freeSlot == nil)
+                Button("编辑") {
+                    if let slot = selectedSlot { openEditor(slot) }
+                }
+                .disabled(selectedSlot == nil)
+                Button("删除") { confirmDelete = true }
+                    .disabled(selectedSlot == nil)
+                Divider().frame(width: 56)
+                Button("试听") {
+                    if let slot = selectedSlot, let s = schemes[slot] {
+                        EngineRegistry.previewScheme(s)
+                    }
+                }
+                .disabled(selectedSlot == nil)
+            }
+            .frame(width: 68)
+        }
+    }
+
+    private func newScheme() -> Scheme {
+        Scheme(
+            primary: SchemeVoiceConfig(engine: "kona", voice: "eddy-zh",
+                                       autoLocale: SchemeSides.defaultPrimaryLocale),
+            secondary: SchemeVoiceConfig(engine: "kona", voice: "eddy-en",
+                                         autoLocale: SchemeSides.defaultSecondaryLocale))
+    }
+
+    private func openEditor(_ slot: String) {
+        guard let s = schemes[slot] else { return }
+        editing = SchemeEditDraft(slot: slot, scheme: s, isNew: false)
+    }
+
+    private func saveScheme(_ scheme: Scheme, slot: String) {
+        var all = SchemeStore.loadAll()
+        all[slot] = scheme
+        do {
+            try SchemeStore.save(all)
+            schemes = all
+            selectedSlot = slot
+            EngineRegistry.refreshVoices()
+        } catch {
+            NSLog("[MagicTTS] 方案保存失败: %@", error.localizedDescription)
+        }
+    }
+
+    private func deleteSelected() {
+        guard let slot = selectedSlot else { return }
+        var all = SchemeStore.loadAll()
+        all.removeValue(forKey: slot)
+        do {
+            try SchemeStore.save(all)
+        } catch {
+            NSLog("[MagicTTS] 方案删除失败: %@", error.localizedDescription)
+        }
+        schemes = all
+        selectedSlot = orderedSlots.first
+        EngineRegistry.refreshVoices()
+    }
+
+    private func reload() {
+        engines = EngineRegistry.engines()
+        schemes = SchemeStore.loadAll()
+        if let sel = selectedSlot, schemes[sel] == nil { selectedSlot = nil }
+        if selectedSlot == nil { selectedSlot = orderedSlots.first }
+        EngineRegistry.refreshVoices()
     }
 }

@@ -9,6 +9,18 @@ enum SegmentTarget {
 
 // MARK: - 规则参数 (随 scheme.json 持久化)
 
+/// 大小写字母处理 — 仅作用于"孤立的单个大写字母"且读给主侧时
+/// (副侧英文发音人本就按字母名朗读, 无需辅助)。
+enum LetterCaseStyle: String, Codable {
+    case none       // 原样朗读
+    case prefixZh   // 前缀 "大写": Z → "大写 Z"
+    case prefixEn   // 前缀 "Capital": Z → "Capital Z"
+    case pitch      // 提高音高 (段带 isolatedCapital 标, 渲染级音高增量)
+
+    /// pitch 变体的音高增量 (桥刻度 0...100, 50 = 常音高)
+    static let pitchDelta = 15
+}
+
 /// 分发规则开关。特殊情况 (网址、型号、缩写、方言混排 …) 优先在这里加开关,
 /// 或在 TextSegmenter.route 的判定链里加条目 — 不要把规则散到调用方。
 struct SegmentRuleOptions: Codable, Equatable {
@@ -18,6 +30,8 @@ struct SegmentRuleOptions: Codable, Equatable {
     var isolatedLetterToPrimary: Bool = true
     /// 数字一律交给主发音人; false = 左右都被英文夹住时归副发音人
     var digitsToPrimary: Bool = true
+    /// 孤立大写字母读给主侧时的辅助方式 (见 LetterCaseStyle)
+    var letterCase: LetterCaseStyle = .none
 
     // 自定义解码: 手改 scheme.json 缺字段时回退默认值, 不整体报废
     init() {}
@@ -26,20 +40,26 @@ struct SegmentRuleOptions: Codable, Equatable {
         englishMinWords = try c.decodeIfPresent(Int.self, forKey: .englishMinWords) ?? 1
         isolatedLetterToPrimary = try c.decodeIfPresent(Bool.self, forKey: .isolatedLetterToPrimary) ?? true
         digitsToPrimary = try c.decodeIfPresent(Bool.self, forKey: .digitsToPrimary) ?? true
+        letterCase = try c.decodeIfPresent(LetterCaseStyle.self, forKey: .letterCase) ?? .none
     }
 }
 
 struct TextSegment: Equatable {
     let text: String
     let target: SegmentTarget
+    /// 音高变体的孤立大写字母段: 独立成段、不与同侧邻段合并 (渲染层对该段
+    /// 附加音高增量; 同 (engine,voice) 相邻段的启动须串行)
+    var isolatedCapital: Bool = false
 }
 
 /// 文本分发规则层 — 策略全部集中于此, 便于按特殊情况逐条增改:
 ///   1. normalize()  — 预处理 (替换/清洗, 目前仅去首尾空白)
 ///   2. splitRuns()  — 按字符类别切成原子 run (CJK / 拉丁 / 数字 / 中性)
-///   3. route()      — 拉丁聚短语判词数、孤立字母、数字归属 → 主/副/待并入
+///   3. route()      — 拉丁聚短语判词数、孤立字母、数字归属 → 主/副/待并入;
+///                     大小写字母处理 (前缀改写 / 音高变体打标) 也在此步
 ///   4. attach()     — 中性字符 (空格/标点) 并入前一 run
-///   5. merge()      — 相邻同侧合并为输出段
+///   5. merge()      — 相邻同侧合并为输出段 (音高变体段保持独立)
+/// 音高变体会产生同侧相邻段 — 渲染层对同 (engine,voice) 段须串行启动。
 enum TextSegmenter {
 
     static func segment(_ raw: String, options: SegmentRuleOptions) -> [TextSegment] {
@@ -109,6 +129,7 @@ enum TextSegmenter {
         let text: String
         let cls: RunClass
         let target: SegmentTarget?   // nil = 数字/中性, 数字下一轮定侧
+        var isolatedCapital: Bool = false
     }
 
     /// 拉丁短语内部允许的中性连接符 (Node.js / don't / state-of-the-art)
@@ -180,7 +201,23 @@ enum TextSegmenter {
                 targets[k] = (prev == .secondary && next == .secondary) ? .secondary : .primary
             }
         }
-        return items.enumerated().map { Routed(text: $1.text, cls: $1.cls, target: targets[$0]) }
+        /* 大小写字母处理: 孤立的单个大写字母 (ASCII A-Z) 读给主侧时生效;
+         * 前缀变体直接改写文本 (可照常与邻段合并), 音高变体只打标 */
+        return items.enumerated().map { i, item -> Routed in
+            var text = item.text
+            var cap = false
+            if targets[i] == .primary, item.cls == .latin,
+               item.latinWords == 1, item.text.unicodeScalars.count == 1,
+               let ch = item.text.unicodeScalars.first, (0x41...0x5A).contains(ch.value) {
+                switch options.letterCase {
+                case .none: break
+                case .prefixZh: text = "大写 " + text
+                case .prefixEn: text = "Capital " + text
+                case .pitch: cap = true
+                }
+            }
+            return Routed(text: text, cls: item.cls, target: targets[i], isolatedCapital: cap)
+        }
     }
 
     // MARK: 4. 中性并入
@@ -190,11 +227,13 @@ enum TextSegmenter {
         for r in routed {
             if r.target != nil {
                 out.append(r)
-            } else if var last = out.last {
-                last = Routed(text: last.text + r.text, cls: last.cls, target: last.target)
+            } else if var last = out.last, !last.isolatedCapital {
+                last = Routed(text: last.text + r.text, cls: last.cls, target: last.target,
+                              isolatedCapital: last.isolatedCapital)
                 out[out.count - 1] = last
             }
-            // 开头未定侧的中性: 丢弃 (normalize 已去首尾空白, 至多是标点)
+            // 音高变体的孤立字母段不吸收后随中性字符 (至多空白/标点, 丢弃),
+            // 保持"单字母段"纯净; 开头未定侧的中性同理丢弃 (normalize 已去首尾)
         }
         return out
     }
@@ -205,10 +244,29 @@ enum TextSegmenter {
         var out: [TextSegment] = []
         for r in routed {
             guard let t = r.target, !r.text.isEmpty else { continue }
-            if let last = out.last, last.target == t {
+            if r.isolatedCapital {
+                out.append(TextSegment(text: r.text, target: t, isolatedCapital: true))
+                continue
+            }
+            if let last = out.last, last.target == t, !last.isolatedCapital {
                 out[out.count - 1] = TextSegment(text: last.text + r.text, target: t)
             } else {
                 out.append(TextSegment(text: r.text, target: t))
+            }
+        }
+        return out
+    }
+
+    /// 同侧强制后重并 (单语音模式 useSecondary=false 时): 相邻段合回一段;
+    /// 音高变体的孤立字母段仍保持独立。
+    static func coalesce(_ segs: [TextSegment]) -> [TextSegment] {
+        var out: [TextSegment] = []
+        for s in segs {
+            if let last = out.last, last.target == s.target,
+               !last.isolatedCapital, !s.isolatedCapital {
+                out[out.count - 1] = TextSegment(text: last.text + s.text, target: s.target)
+            } else {
+                out.append(s)
             }
         }
         return out

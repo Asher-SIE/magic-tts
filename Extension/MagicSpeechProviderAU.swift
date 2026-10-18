@@ -199,12 +199,17 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
                         supportedLanguages: [lang]))
                 }
             }
-            /* 双语方案槽位: 固定注册 (目录对未变化的 app 不重查);
+            /* 方案槽位: 只注册已创建的 (scheme.json 出现的键); 名称带方案备注。
+             * 增/删后 App 端调 updateSpeechVoices 让目录重查;
              * 槽位→实际发音人映射在请求时读 scheme.json, 改配置即时生效. */
             if mode >= 2 {
-                for slot in SchemeStore.slots {
+                let all = SchemeStore.loadAll()
+                for slot in SchemeStore.slots where all[slot] != nil {
+                    let label = all[slot]!.label
+                    let name = (SchemeStore.slotNames[slot] ?? slot)
+                        + (label.isEmpty ? "" : " — \(label)")
                     voices.append(AVSpeechSynthesisProviderVoice(
-                        name: SchemeStore.slotNames[slot] ?? slot,
+                        name: name,
                         identifier: "com.magictts.scheme.\(slot)",
                         primaryLanguages: ["zh-CN"],
                         supportedLanguages: ["zh-CN", "en-US"]))
@@ -254,7 +259,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
                 name: "\(n)·English (Kona)", identifier: "com.magictts.kona.\(n.lowercased())-en",
                 primaryLanguages: ["en-US"], supportedLanguages: ["en-US"]))
         }
-        for slot in SchemeStore.slots {
+        for slot in SchemeStore.slots.prefix(2) {
             list.append(AVSpeechSynthesisProviderVoice(
                 name: SchemeStore.slotNames[slot] ?? slot,
                 identifier: "com.magictts.scheme.\(slot)",
@@ -271,22 +276,31 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
 
         var newPlans: [SegPlan] = []
         if engineKey == "scheme", let slot = voiceKey, SchemeStore.slotNames[slot] != nil {
-            let scheme = SchemeStore.loadAll()[slot] ?? SchemeStore.defaults()[slot]!
+            let scheme = SchemeStore.loadAll()[slot] ?? SchemeStore.fallback()
             let p = SchemeStore.resolve(scheme.primary)
-            let s = SchemeStore.resolve(scheme.secondary)
+            let s = scheme.useSecondary ? SchemeStore.resolve(scheme.secondary) : p
             /* 方案语音: 语速/音高/音量全部 MagicTTS 托管 (scheme.json),
              * 忽略请求里的 prosody — VO 面板对方案本就无效, 不做跟随. */
             /* 朗读替换规则: 方案侧按 useRules 开关, 分段前作用于整句 */
             let text = scheme.useRules ? RuleStore.shared().apply(parsed.text) : parsed.text
-            newPlans = TextSegmenter.segment(text, options: scheme.rules).map { seg in
-                let isPrimary = seg.target == .primary
+            var segs = TextSegmenter.segment(text, options: scheme.rules)
+            /* 单语音模式: 全部段归主侧后重并 (音高变体的孤立字母段仍独立) */
+            if !scheme.useSecondary {
+                segs = TextSegmenter.coalesce(segs.map {
+                    TextSegment(text: $0.text, target: .primary, isolatedCapital: $0.isolatedCapital)
+                })
+            }
+            newPlans = segs.map { seg in
+                let isPrimary = !scheme.useSecondary || seg.target == .primary
                 let side = isPrimary ? scheme.primary : scheme.secondary
                 let r = isPrimary ? p : s
+                var pitch = side.pitch
+                if seg.isolatedCapital { pitch = min(100, pitch + LetterCaseStyle.pitchDelta) }
                 return SegPlan(engine: r.engine, voice: r.voice, text: seg.text,
-                               rate: Int32(side.rate), pitch: Int32(side.pitch),
+                               rate: Int32(side.rate), pitch: Int32(pitch),
                                gain: Float(side.volume) / 100.0)
             }
-            NSLog("[MagicTTS] scheme=\(slot) 主=\(p.engine) 副=\(s.engine) → \(newPlans.count) 段 text=\(text.prefix(32))")
+            NSLog("[MagicTTS] scheme=\(slot) 主=\(p.engine) 副=\(s.engine) 二语音=\(scheme.useSecondary) → \(newPlans.count) 段 text=\(text.prefix(32))")
         } else {
             /* 普通引擎语音: 全局规则直接应用 (规则本身可逐条停用) */
             let text = RuleStore.shared().apply(parsed.text)
@@ -358,11 +372,20 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
     // MARK: - 段启动 (请求线程同步起第 0 段; 后续段由 starter 流水线起)
 
     /// 取下一个待启动段 (须 ≤ 渲染位置+1, 保持流水线深度 1). 无 → -1.
+    /// 同 (engine,voice) 串行约束 (MS 会话 launch 前 stop+复位拍, 不容并发流):
+    /// 音高变体的孤立字母段会与邻段同侧 → 待启段与任一在途流同 voice 时暂缓,
+    /// 由渲染线程读尽退役后再启 (scheduleStarter 会持续重试).
     private func popLaunchIndex() -> Int {
         stateLock.lock()
         defer { stateLock.unlock() }
         if cancelled { return -1 }
         guard nextToStart < plans.count, nextToStart <= currentIdx + 1 else { return -1 }
+        if nextToStart > 0 {
+            let np = plans[nextToStart]
+            for i in 0..<streams.count where i != nextToStart && streams[i] != nil {
+                if plans[i].engine == np.engine && plans[i].voice == np.voice { return -1 }
+            }
+        }
         let idx = nextToStart
         nextToStart += 1
         return idx
