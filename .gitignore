@@ -2,3 +2,4 @@ build/
 .DS_Store
 resources/yongde/voices/*.vl
 resources/ms-voices/
+VoAssist/
