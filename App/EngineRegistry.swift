@@ -135,7 +135,9 @@ enum EngineRegistry {
     /// 方案试听: 与 appex 渲染同一条分发链 (切段 → 逐段桥合成 → 重采样 24k 拼接,
     /// 各段带方案音量增益) → AVAudioPlayer 播放。
     static func previewScheme(_ scheme: Scheme) {
-        let segs = TextSegmenter.segment(schemePreviewText, options: scheme.rules)
+        // 与 appex 同链: 先过朗读替换规则 (方案开关), 再切段
+        let text = scheme.useRules ? RuleStore.shared().apply(schemePreviewText) : schemePreviewText
+        let segs = TextSegmenter.segment(text, options: scheme.rules)
         DispatchQueue.global(qos: .userInitiated).async {
             _ = mtts_global_scan(MagicPaths.enginesRoot.path)
             let outRate: Double = 24000

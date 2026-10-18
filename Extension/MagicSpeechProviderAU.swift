@@ -276,7 +276,9 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
             let s = SchemeStore.resolve(scheme.secondary)
             /* 方案语音: 语速/音高/音量全部 MagicTTS 托管 (scheme.json),
              * 忽略请求里的 prosody — VO 面板对方案本就无效, 不做跟随. */
-            newPlans = TextSegmenter.segment(parsed.text, options: scheme.rules).map { seg in
+            /* 朗读替换规则: 方案侧按 useRules 开关, 分段前作用于整句 */
+            let text = scheme.useRules ? RuleStore.shared().apply(parsed.text) : parsed.text
+            newPlans = TextSegmenter.segment(text, options: scheme.rules).map { seg in
                 let isPrimary = seg.target == .primary
                 let side = isPrimary ? scheme.primary : scheme.secondary
                 let r = isPrimary ? p : s
@@ -284,9 +286,11 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
                                rate: Int32(side.rate), pitch: Int32(side.pitch),
                                gain: Float(side.volume) / 100.0)
             }
-            NSLog("[MagicTTS] scheme=\(slot) 主=\(p.engine) 副=\(s.engine) → \(newPlans.count) 段 text=\(parsed.text.prefix(32))")
+            NSLog("[MagicTTS] scheme=\(slot) 主=\(p.engine) 副=\(s.engine) → \(newPlans.count) 段 text=\(text.prefix(32))")
         } else {
-            newPlans = [SegPlan(engine: engineKey, voice: voiceKey, text: parsed.text,
+            /* 普通引擎语音: 全局规则直接应用 (规则本身可逐条停用) */
+            let text = RuleStore.shared().apply(parsed.text)
+            newPlans = [SegPlan(engine: engineKey, voice: voiceKey, text: text,
                                 rate: Int32(parsed.rate), pitch: Int32(parsed.pitch), gain: 1.0)]
         }
 

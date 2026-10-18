@@ -37,13 +37,16 @@ struct Scheme: Codable, Equatable {
     var primary: SchemeVoiceConfig
     var secondary: SchemeVoiceConfig
     var rules: SegmentRuleOptions = SegmentRuleOptions()
+    var useRules: Bool = true      // 是否应用全局朗读替换规则 (rules.json)
 
     init(primary: SchemeVoiceConfig, secondary: SchemeVoiceConfig,
-         label: String = "", rules: SegmentRuleOptions = SegmentRuleOptions()) {
+         label: String = "", rules: SegmentRuleOptions = SegmentRuleOptions(),
+         useRules: Bool = true) {
         self.label = label
         self.primary = primary
         self.secondary = secondary
         self.rules = rules
+        self.useRules = useRules
     }
 
     init(from decoder: Decoder) throws {
@@ -52,6 +55,7 @@ struct Scheme: Codable, Equatable {
         primary = try c.decode(SchemeVoiceConfig.self, forKey: .primary)
         secondary = try c.decode(SchemeVoiceConfig.self, forKey: .secondary)
         rules = try c.decodeIfPresent(SegmentRuleOptions.self, forKey: .rules) ?? SegmentRuleOptions()
+        useRules = try c.decodeIfPresent(Bool.self, forKey: .useRules) ?? true
     }
 }
 

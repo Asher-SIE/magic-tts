@@ -40,6 +40,14 @@ TTS 引擎注册为系统语音（VoiceOver / 朗读内容 / `say` 均可用）�
 - 逐段流水线：启动线程领先渲染位置 1 段预热下一段，消除段间切换静默；跨采样率
   段（永德 16k ↔ MS 24k）按段切换重采样率。
 
+## 朗读替换规则
+
+朗读前按序做文本替换，修正多音字、英文缩写读法、数字符号等（如「重新→虫新」
+让"重"读 chóng、`(\d+)% → 百分之$1`）。全局一份 `Engines/rules.json`，App
+「朗读替换规则」编辑（普通文本/正则/忽略大小写/英文整词，逐条可停用、实时
+预览）；普通引擎语音全局应用，双语方案可在方案编辑里整体关闭。与 scheme.json
+同模式按文件修改时间缓存——改完即时生效，无需重装。
+
 > **流式与延迟**（2026-10-17 实测）：MS 引擎改为 `start_speaking_ssml` + wav 文件
 > 跟随的流式架构——首块音频 ~0.73s（模型首次推理）后即开始朗读，合成以 ~1.6×
 > 实时供给；appex 进程与合成会话跨句复用，首句之后即热。旧架构需等整段合成
@@ -49,9 +57,9 @@ TTS 引擎注册为系统语音（VoiceOver / 朗读内容 / `say` 均可用）�
 ## 目录结构
 
 ```
-App/            SwiftUI 宿主（引擎状态表 + 方案编辑/试听 + 刷新注册）
+App/            SwiftUI 宿主（引擎状态表 + 方案编辑/试听 + 朗读规则编辑 + 刷新注册）
 Extension/      AU 扩展（MagicSpeechProviderAU 段队列渲染 + SSML 解析）
-Shared/         App Group 路径约定 / Scheme 方案模型 / TextSegmenter 分发规则
+Shared/         App Group 路径约定 / Scheme 方案模型 / TextSegmenter 分发规则 / 朗读替换规则
 Bridge/         C 引擎桥（路由 + 各引擎适配器）
 Entitlements/   沙盒 + App Group
 scripts/        构建 / 数据安装 / 下载 / 诊断工具

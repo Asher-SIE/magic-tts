@@ -99,6 +99,7 @@ struct SchemeEditor: View {
                 sideSection("英文侧参数", $scheme.secondary)
 
                 Section("分发规则") {
+                    Toggle("应用朗读替换规则 (全局 rules.json)", isOn: $scheme.useRules)
                     Toggle("孤立字母归中文侧 (如 “Z 分组”)", isOn: $scheme.rules.isolatedLetterToPrimary)
                     Toggle("数字归中文侧", isOn: $scheme.rules.digitsToPrimary)
                     Stepper("英文最少词数: \(scheme.rules.englishMinWords)",
@@ -167,6 +168,7 @@ struct SchemeEditor: View {
 struct ContentView: View {
     @State private var engines: [EngineStatus] = []
     @State private var schemes: [String: Scheme] = [:]
+    @State private var showRules = false
 
     /// 全引擎发音人拍平 (方案编辑用), 每引擎的"自动"项排在该引擎发音人之前
     private var voiceOptions: [VoiceOption] {
@@ -224,6 +226,7 @@ struct ContentView: View {
                 .font(.caption2).foregroundStyle(.secondary)
 
             HStack {
+                Button("朗读替换规则…") { showRules = true }
                 Button("刷新语音列表") {
                     engines = EngineRegistry.engines()
                     schemes = SchemeStore.loadAll()
@@ -236,6 +239,7 @@ struct ContentView: View {
         }
         .padding(16)
         .frame(minWidth: 760, minHeight: 460)
+        .sheet(isPresented: $showRules) { RulesView() }
         .onAppear {
             engines = EngineRegistry.engines()
             schemes = SchemeStore.loadAll()
