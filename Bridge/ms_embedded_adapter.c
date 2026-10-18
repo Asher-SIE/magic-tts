@@ -417,7 +417,7 @@ static void *ms_create(const char *root, const mtts_engine_desc *desc) {
              ms_bind(c->dl, (void **)&c->release_synth,   "synthesizer_handle_release");
     if (!ok) { dlclose(c->dl); free(c); return NULL; }
 
-    /* 扫描 model/ 下的 .license 包 (各为一个发音人) */
+    /* 扫描 model/ 下的发音人包 (SynthModel.license 或 .key, 各为一个发音人) */
     mtts_voice_scan scan[MS_MAX_PKG];
     c->npkg = ms_scan_pkgs(c->edir, c->ename, c->pkgs, MS_MAX_PKG, scan, MS_MAX_PKG);
     if (c->npkg == 0) {

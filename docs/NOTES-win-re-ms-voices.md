@@ -173,3 +173,44 @@ NOTES-ms-streaming.md 原判（流水线掩盖 / 配非 HD）。
 | Output.EnableBuffer/BatchSize/FirstBatchSize/Throttling 读取 | embedded.tts.dll `0x1800a3190`–`0x1800a33c4` |
 | "Key:" / "##Encrypted##" / MicrosoftTTS 组件注册 | embedded.tts.dll `0x1800011d0`–`0x18000172a` |
 | AESGCMEncryptionEngine / WRONG_DECRYPTION_KEY / INVALID_LICENSE | embedded.tts.dll RTTI 与错误表 `0x180005730` 一带 |
+
+## 7. macOS 实现正确性复查与文档冲突清单（2026-10-19）
+
+对照本报告逐项复查 macOS 侧实现（`Bridge/ms_embedded_adapter.c` 全文 +
+`scripts/ms_stream_probe.c` + 各 NOTES/注释）。
+
+### 7.1 与 Windows 证据一致、判为正确的做法
+
+| macOS 做法 | Windows 证据 | 判定 |
+|---|---|---|
+| 三参数 `set_speech_synthesis_voice(cfg, 名, 凭证)` | core.dll `0x180023e20` 同 ABI | 正确（10-17 实测先于本文档还原出该 ABI） |
+| 语音名用 Tokens.xml 完整显示名 | Windows 传入名同样取自 SDK voices 列表（完整名） | 正确 |
+| 输出格式属性 3102(name=NULL)="raw-24khz-16bit-mono-pcm" | Windows 枚举 ID 16 = 同一字符串（`0x18003c326`） | 正确；"wav 无 RIFF 头" 与 raw 格式互证 |
+| license 包传全文 | grtts `0x180041c76` 分支同款 | 正确 |
+| 会话/合成器懒建 + 跨句常驻 | Windows 常驻单 synth | 正确（等价；Windows 是全量单 config，macOS 每发音人一套，叶子目录模式下等价成立） |
+| 模型包物料跨平台直接复用 | 同一批包 | 正确 |
+
+### 7.2 Windows 有而 macOS 不同的点（合理适配，无需改）
+
+- 音频取出：Windows = PushAudioOutputStream + synthesizing 回调；macOS = wav
+  文件跟随（macOS 实测事件/直取均 0 字节，文件跟随是当地可行解，两者都属
+  AudioConfig 目的地）；
+- 句边界 true / 标点 false：NVDA 朗读索引用途，macOS 场景不需要；
+- SDK 版本：Windows 内部 1.45.0 vs macOS 公开 1.48.2（见 §4，"Key:" 支持
+  待实测——这是当前唯一悬而未决的兼容风险）。
+
+### 7.3 与本次调查冲突的文档/注释（已全部就地标记）
+
+| # | 位置 | 冲突内容 | 处理 |
+|---|---|---|---|
+| 1 | NOTES-ms-streaming.md「发音人物料现状」 | "云希 .key 包被拒 reason=1" — 诊断过期：根因是裸传 key 内容（缺 `Key:` 前缀被引擎当 license 校验），非包不可用 | 就地 ⚠️ 标注 |
+| 2 | NOTES-ms-streaming.md「HD vs 非HD」结论 | "~120ms 为 SDK/模型内在成本，适配层无法移除" — 与 §3 线索冲突（Windows 无此惩罚且叶子目录使 INI 生效，SeqLen 5 vs 默认 24） | 就地 ⚠️ 标注，HD 矩阵待复测 |
+| 3 | Bridge/include/engine_bridge.h | "含 SynthModel.license 的包一个发音人" — 漏 .key | 注释已直接修正 |
+| 4 | ms_embedded_adapter.c ms_create 注释 | 同上（上次改动遗留） | 注释已直接修正 |
+| 5 | scripts/ms_stream_probe.c | 只挑 .license 包，无法测 .key（实验清单 #1 需走适配器路径或先扩展 pick_pkg） | 源码注释已标注 |
+
+### 7.4 复查结论
+
+macOS 实现的两处真实偏差（.key 凭证格式、add_path 路径粒度）已在上一提交
+修正；其余差异属合理平台适配。剩余不确定性收敛为一项：**公开 1.48.2 对
+`Key:` 前缀约定的支持**，实验清单 #1/#4 直接回答。

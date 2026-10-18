@@ -54,7 +54,7 @@ int mtts_engine_loaded(const char *key);
 
 /* ---- 发音人 (一个引擎内的多个可选语音) ----
  * 永德: voices/ 下每个 .vl 文件一个发音人;
- * MS: model/ 下每个含 SynthModel.license 的包一个发音人.
+ * MS: model/ 下每个含 SynthModel.license 或 SynthModel.key 的包一个发音人.
  * 描述在 mtts_global_scan 后即有效 (存活到进程结束). */
 typedef struct {
     const char *key;        /* 选择键: "ydvoice01" / 包目录名; 传 "" = 默认 */

@@ -28,7 +28,9 @@ static double now_ms(void) {
 
 static char g_root[1024];
 
-/* 拉包信息: model/ 下第一个 SynthModel.license 包 → 完整语音名 + license */
+/* 拉包信息: model/ 下第一个 SynthModel.license 包 → 完整语音名 + license
+ * (⚠️ 不挑 .key 包 — 测 .key 须走适配器路径或扩展本函数:
+ *  凭证 = "Key:"+SynthModel.key 内容, 见 docs/NOTES-win-re-ms-voices.md §2) */
 static char pkg_dir[512], voice_full[256];
 static char *lic = NULL;
 

@@ -46,7 +46,10 @@ ms_warm_thread 保留在代码中备查。
 ## 发音人物料现状
 
 本地可用 HD 包仅 1 个 (晓晓 HD): naturalvoice 与 onecore 各有一份拷贝。
-云希 Natural 包只有 SynthModel.key (被拒, reason=1)。更多发音人需用
+云希 Natural 包只有 SynthModel.key
+(⚠️ 修正 2026-10-19 逆向, 见 NOTES-win-re-ms-voices.md: "被拒 reason=1" 的根因
+是当时裸传 key 内容 — Windows 侧须传 `"Key:"+内容`, 引擎按前缀走解密路径;
+适配器已改, .key 包理论可用, 待实测)。更多发音人需用
 fetch-voice-models.sh 从广荣服务器下载 HD 包 (需要账号)。
 
 ## 语速封顶与 Sonic 补速 (2026-10-18)
@@ -170,6 +173,10 @@ Ava HD 667 / Eric 173 / Michelle 217 (ms) — 非"晓晓专属", 是 **HD 模型
   SSML → 116-131ms 无差别 (prosody 排除); 单字 13-25ms 证明链路本身极快;
 - 结论: HD (NaturalHD 神经模型) 前端在出首音频前需完成整句前端处理,
   非 HD 逐块直出。**~120ms 为 SDK/模型内在成本, 适配层无法移除**;
+  (⚠️ 修正 2026-10-19 逆向, 见 NOTES-win-re-ms-voices.md §3: "适配层无法移除"
+  结论存疑 — Windows 侧无此惩罚且 add_path 传 `data/<VoiceId>` 叶子目录,
+  `<LCID>.INI` 随之生效: HDVoiceSeqLen=5(未读到 INI 时引擎默认 24)+
+  关输出缓冲/节流。适配器已改传叶子目录, 本矩阵需复测后再下结论);
 - 用户感知: dual2 主侧=晓晓 HD @220 → 每句开头 ~120-190ms (方案里英文
   段多为后续段, 被流水线掩盖故"只有晓晓明显"); 冷启 ~650ms 已由
   .lastvoice 预热治理。极致低延迟场景可配非 HD (Eric/Michelle) 或
