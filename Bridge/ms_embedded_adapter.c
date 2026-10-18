@@ -7,11 +7,14 @@
  *   1. SPX*HANDLE 为指针尺寸 (按 32 位截断会 SIGBUS);
  *   2. 语音名 = Tokens.xml 里的完整显示名 ("Microsoft Xiaoxiao (Natural HD) - ..."),
  *      短名 zh-CN-XiaoxiaoNeural 会报 VOICENAME_NOTEXIST;
- *   3. 必须调 set_speech_synthesis_voice(cfg, 完整名, license全文):
- *      license = 包根的 SynthModel.license (HD包), 不带 → WRONG_DECRYPTION_KEY;
+ *   3. 必须调 set_speech_synthesis_voice(cfg, 完整名, 凭证):
+ *      license 包 = SynthModel.license 全文, 不带 → WRONG_DECRYPTION_KEY;
+ *      .key 包 = "Key:"+SynthModel.key 内容 (Windows 逆向 2026-10-19, 见
+ *      docs/NOTES-win-re-ms-voices.md; 之前裸传 key 内容 → reason=1);
  *   4. 必须设输出格式属性 (id 3102, name 传 NULL) = "raw-24khz-16bit-mono-pcm",
  *      否则默认 16kHz → AUDIO_FORMAT_NOT_SUPPORTED (模型仅 24k);
- *   5. 仅 .key 的 Natural 包不可用 (set_voice 后合成 reason=1, 实测), 只列 .license 包;
+ *   5. .key 的 Natural 包: Windows 侧以 "Key:"+90字符 传入可用 (全部 7 包共用
+ *      同一把 key); 本适配器已改为同样传法, 待 macOS 实测;
  *   6. 音频只走 AudioConfig 目的地 (result/事件/pull 流均 0 字节, 实测);
  *      → 流式 = start_speaking_ssml 立即返回 + 跟随 wav 文件增长读回,
  *        completed/canceled 回调 (arg1=synth 句柄, 不传 ctx!) 作结束信号.
@@ -24,7 +27,7 @@
  *
  * 布局: Engines/<key>/
  *   libMicrosoft.CognitiveServices.Speech.core.dylib (+embedded.tts/+onnxruntime)
- *   model/<包>/            ← 语音包, 每个含 SynthModel.license 的包 = 一个发音人
+ *   model/<包>/            ← 语音包, 含 SynthModel.license 或 .key 的包 = 一个发音人
  *   voice.txt              ← 可选: 完整语音名, 命中则该包为默认发音人
  */
 #include "adapters.h"
@@ -73,7 +76,9 @@ typedef int   (*fn_release_synth)(ms_handle);
 typedef struct {
     char dir[256];        /* 包目录名 (发音人选择键) */
     char voice[256];      /* Tokens.xml 完整语音名 */
-    char licpath[1024];
+    char vdir[256];       /* data/ 下的模型叶子目录名 (如 zh-CN-XiaoxiaoNaturalHD) */
+    char credpath[1024];  /* SynthModel.license 或 SynthModel.key 路径 */
+    int keypkg;           /* 凭证为 .key: 传入 SDK 时需 "Key:" 前缀 */
     void *sess;           /* 懒建的合成会话 */
 } ms_pkg;
 
@@ -254,19 +259,22 @@ static void pkg_display_name(const char *dir, const char *engine_name,
              strstr(dir, "NaturalHD") ? " HD" : "");
 }
 
-/* 包目录 → Tokens.xml 提取完整语音名 (第一个 <String name="" value="..."/>) */
+/* 包目录 → Tokens.xml 提取完整语音名 (第一个 <String name="" value="..."/>);
+ * vdir 输出 Tokens.xml 所在的 data/ 叶子目录名 (Windows 侧 add_path 传的就是它) */
 static int pkg_voice_fullname(const char *modeldir, const char *dir,
-                              char *voice, size_t vsz) {
+                              char *voice, size_t vsz,
+                              char *vdir, size_t dsz) {
     char dd[1280];
     snprintf(dd, sizeof(dd), "%s/%s/data", modeldir, dir);
     DIR *d = opendir(dd);
     if (!d) return -1;
     struct dirent *e;
     char tokens[1536] = {0};
+    char leaf[256] = {0};
     while ((e = readdir(d)) != NULL) {
         if (e->d_name[0] == '.') continue;
         snprintf(tokens, sizeof(tokens), "%s/%s/Tokens.xml", dd, e->d_name);
-        if (access(tokens, R_OK) == 0) break;
+        if (access(tokens, R_OK) == 0) { snprintf(leaf, sizeof(leaf), "%s", e->d_name); break; }
         tokens[0] = 0;
     }
     closedir(d);
@@ -281,6 +289,7 @@ static int pkg_voice_fullname(const char *modeldir, const char *dir,
     memcpy(voice, v, end - v);
     voice[end - v] = 0;
     free(xml);
+    if (vdir) snprintf(vdir, dsz, "%s", leaf);
     return 0;
 }
 
@@ -298,18 +307,25 @@ static int ms_scan_pkgs(const char *edir, const char *ename,
     int n = 0;
     while ((e = readdir(d)) != NULL && n < limit) {
         if (e->d_name[0] == '.') continue;
-        char p[1280];
+        char p[1280], pkey[1280];
         snprintf(p, sizeof(p), "%s/%s/SynthModel.license", modeldir, e->d_name);
-        if (access(p, R_OK) != 0) continue;   /* 仅 .key 的 Natural 包被拒 (见头部注释 5) */
-        char voice[256];
-        if (pkg_voice_fullname(modeldir, e->d_name, voice, sizeof(voice)) != 0) {
+        snprintf(pkey, sizeof(pkey), "%s/%s/SynthModel.key", modeldir, e->d_name);
+        int keypkg = 0;
+        if (access(p, R_OK) == 0) keypkg = 0;
+        else if (access(pkey, R_OK) == 0) { keypkg = 1; snprintf(p, sizeof(p), "%s", pkey); }
+        else continue;   /* 两种凭证都没有: 非发音人目录 */
+        char voice[256], vdir[256];
+        if (pkg_voice_fullname(modeldir, e->d_name, voice, sizeof(voice),
+                               vdir, sizeof(vdir)) != 0) {
             fprintf(stderr, "[MagicTTS][ms] %s: 提取语音名失败, 跳过\n", e->d_name);
             continue;
         }
         if (pkgs) {
             snprintf(pkgs[n].dir, sizeof(pkgs[n].dir), "%s", e->d_name);
-            snprintf(pkgs[n].licpath, sizeof(pkgs[n].licpath), "%s", p);
+            snprintf(pkgs[n].credpath, sizeof(pkgs[n].credpath), "%s", p);
             snprintf(pkgs[n].voice, sizeof(pkgs[n].voice), "%s", voice);
+            snprintf(pkgs[n].vdir, sizeof(pkgs[n].vdir), "%s", vdir);
+            pkgs[n].keypkg = keypkg;
             pkgs[n].sess = NULL;
         }
         snprintf(out[n].key, sizeof(out[n].key), "%s", e->d_name);
@@ -332,7 +348,8 @@ static int ms_scan_pkgs(const char *edir, const char *ename,
                 if (pkgs) match = strcmp(pkgs[i].voice, vt) == 0;
                 else {
                     char voice[256];
-                    match = pkg_voice_fullname(modeldir, out[i].key, voice, sizeof(voice)) == 0
+                    match = pkg_voice_fullname(modeldir, out[i].key, voice, sizeof(voice),
+                                               NULL, 0) == 0
                             && strcmp(voice, vt) == 0;
                 }
                 if (match) {
@@ -404,7 +421,7 @@ static void *ms_create(const char *root, const mtts_engine_desc *desc) {
     mtts_voice_scan scan[MS_MAX_PKG];
     c->npkg = ms_scan_pkgs(c->edir, c->ename, c->pkgs, MS_MAX_PKG, scan, MS_MAX_PKG);
     if (c->npkg == 0) {
-        fprintf(stderr, "[MagicTTS][ms] model/ 下没有含 SynthModel.license 的包 (仅 .key 的包不可用)\n");
+        fprintf(stderr, "[MagicTTS][ms] model/ 下没有含 SynthModel.license/.key 的包\n");
         dlclose(c->dl); free(c);
         return NULL;
     }
@@ -513,18 +530,30 @@ static ms_vsession *ms_get_session(ms_ctx *c, ms_pkg *pk) {
     pthread_mutex_init(&vs->lock, NULL);
     pthread_cond_init(&vs->warm_cond, NULL);
 
-    char *lic = ms_read_file(pk->licpath, NULL);
-    if (!lic) { fprintf(stderr, "[MagicTTS][ms] license 读失败: %s\n", pk->licpath); goto fail; }
+    char *cred = ms_read_file(pk->credpath, NULL);
+    if (!cred) { fprintf(stderr, "[MagicTTS][ms] 凭证读失败: %s\n", pk->credpath); goto fail; }
+
+    /* .key 包须加 "Key:" 前缀 (Windows grtts_x64.dll 逆向结论: 前缀决定引擎走
+     * AES-GCM 解密路径而非 license 校验; 主 key 90 字符, 7 个 OneCore 包通用) */
+    char keybuf[160];
+    const char *cred_arg = cred;
+    if (pk->keypkg) {
+        snprintf(keybuf, sizeof(keybuf), "Key:%s", cred);
+        cred_arg = keybuf;
+    }
 
     ms_handle cfg = 0;
-    char modeldir[1024];
-    snprintf(modeldir, sizeof(modeldir), "%s/model", c->edir);
-    if (c->cfg_create(&cfg) != 0 || c->cfg_add_path(cfg, modeldir) != 0) {
-        fprintf(stderr, "[MagicTTS][ms] fromPath 失败: %s\n", modeldir);
-        free(lic); goto fail;
+    /* add_path 传模型叶子目录 (<LCID>.INI 所在处, Windows 同款): 引擎按 INI 取
+     * HDVoiceSeqLen=5 / 关输出缓冲与节流; 传父目录时 INI 可能不加载, SeqLen
+     * 退化为默认 24 → HD 语音首块台阶延迟 (详见 docs/NOTES-win-re-ms-voices.md) */
+    char leafdir[2048];
+    snprintf(leafdir, sizeof(leafdir), "%s/model/%s/data/%s", c->edir, pk->dir, pk->vdir);
+    if (c->cfg_create(&cfg) != 0 || c->cfg_add_path(cfg, leafdir) != 0) {
+        fprintf(stderr, "[MagicTTS][ms] fromPath 失败: %s\n", leafdir);
+        free(cred); goto fail;
     }
-    int rc = c->cfg_set_voice(cfg, pk->voice, lic);
-    free(lic);
+    int rc = c->cfg_set_voice(cfg, pk->voice, cred_arg);
+    free(cred);
     if (rc != 0) { fprintf(stderr, "[MagicTTS][ms] set_voice rc=0x%x (%s)\n", rc, pk->voice); goto fail; }
 
     /* 输出格式: 模型仅 24kHz (id 3102, name 必须传 NULL) */
@@ -980,7 +1009,7 @@ const mtts_adapter_if *mtts_ms_adapter(void) { return &kMsAdapter; }
 /* ==== 10-17 排障记录 (供后来者) ====
  * SIGBUS: 句柄按 uint32 截断 → 改 void*。
  * VOICENAME_NOTEXIST: 短名 → 用 Tokens.xml 完整显示名。
- * WRONG_DECRYPTION_KEY: 未传 license → set_voice(cfg, 名, SynthModel.license 全文)。
+ * WRONG_DECRYPTION_KEY: 未传凭证 → set_voice(cfg, 名, license全文或"Key:"+key内容)。
  * AUDIO_FORMAT_NOT_SUPPORTED: 默认16k → 属性3102(name=NULL)="raw-24khz-16bit-mono-pcm"。
  * 流式关键实测 (ms_stream_probe.c, 2026-10-17):
  *   - result/事件直取音频均 0 字节 (空 AudioConfig 下 Synthesizing 事件也空),
