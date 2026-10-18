@@ -33,4 +33,4 @@ done
 
 echo
 echo "完成. 下一步: 嵌入式模型放入 $ENG/naturalvoice/model/ 与 $ENG/onecore/model/"
-echo "(下载需 gr.run 账号, 见 HANDOFF.md 第 3 步)"
+echo "(下载需 gr.run 账号; 语音包离线备份在 resources/ms-voices/NeuralVoices/)"

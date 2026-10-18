@@ -17,8 +17,8 @@ TTS 引擎注册为系统语音（VoiceOver / 朗读内容 / `say` 均可用）�
 - 永德：`voices/` 下每个 `ydvoiceNN.vl` 就是一个发音人，首次使用某发音人时加载；
 - MS 引擎：`model/` 下每个含 `SynthModel.license` 的包 = 一个发音人（懒建会话）。
   **仅 .key 的 Natural 包不可用**（传入 `set_speech_synthesis_voice` 后合成
-  reason=1，需服务器侧激活）。tts2 的 NeuralVoices 共 14 包，license 型 7 个
-  已全部装入（中文 3 + 英文 4）。想再增加发音人：用 `scripts/fetch-voice-models.sh`
+  reason=1，需服务器侧激活）。NeuralVoices 共 14 包（离线备份在
+  `resources/ms-voices/NeuralVoices/`），license 型 7 个已全部装入（中文 3 + 英文 4）。想再增加发音人：用 `scripts/fetch-voice-models.sh`
   下载另一个 **HD/license** 包放进 `Engines/<key>/model/`，重装 App 即自动列出。
   `voice.txt`（完整语音名）可指定该引擎的默认发音人。语音 locale 按包目录名
   尾段解析（en-US/zh-TW 等），未知回退引擎级。
@@ -92,8 +92,8 @@ open -a ~/Applications/MagicTTS.app       # 启动即刷新发音人注册
 
 ## 项目内资源（自包含，不再依赖旧工作区素材）
 
-> VVTTS 素材（IBM ViaVoice 中文引擎）调研完结：本体已解出至
-> `VVTTS/unpacked/`（6 个 i386 PE DLL，CRC 全过），解包器与格式笔记见
+> VVTTS 素材（IBM ViaVoice 中文引擎）调研完结：全套素材在 `resources/vvtts/`，
+> 本体已解出至 `resources/vvtts/unpacked/`（6 个 i386 PE DLL，CRC 全过），解包器与格式笔记见
 > `tools/unpack_vvtts.py` 与 `docs/NOTES-vvtts.md`。集成需 yongde 式逆向
 > 重写（数周级），暂未立项——细节、利弊与建议次序都在 NOTES 里。
 
@@ -103,17 +103,22 @@ resources/
 │   ├── voices/ydvoice00-04.vl   # 全部 5 个音色语音库 (~51M, 未入 git)
 │   ├── pinyin.txt / phrases.txt # 拼音词典
 │   └── libyongde_tts.so         # Android arm64 引擎本体 (二期逆向参考: Sonic 变速/多音色)
+├── vvtts/                       # VVTTS 全套素材 (38M, 未入 git): 原始 APK + apktool 树
+│                                #   + unpacked/ 6 个解出的 i386 PE 引擎 (唯一副本) + 听感样本
+├── ms-voices/                   # NeuralVoices 微软语音包离线备份 (1.4G, 14 包 / 7 个 license 型, 未入 git)
 └── reference/
-    ├── tts.apk                  # 原始 APK (347M, 未入 git) — 一切素材的最终出处
+    ├── tts.apk                  # 原始 APK (347M, 未入 git) — Android 侧素材的最终出处
+    ├── grtts.nvda-addon         # Windows NVDA 插件原始包 (152M, 未入 git) — Windows 侧源档
     └── restored*/               # Android 调用链 Java 还原源 (注释出处引用)
 ```
 
 永德数据以 `resources/yongde` 为权威源，`populate-engines.sh` 默认从这里安装；
-MS 引擎数据体量大（容器内现 924M），不入项目目录，由组容器 + 下载脚本承担。
-⚠️ **删除外部旧工作区（tts2/ 等）前注意**：微软语音包（HD `.license`）的离线
-备份只在 tts2 的 `NeuralVoices/` 里，装进容器的是唯一可用副本；`fetch-voice-models.sh`
-依赖广荣服务器账号，未必随时可下。建议删除前把容器 Engines 目录或 tts2 的
-NeuralVoices 打包留档一份。
+MS 引擎数据体量大（容器内现 924M），运行态由容器 + 下载脚本承担，语音包离线
+备份在 `resources/ms-voices/NeuralVoices/`（含 7 个 HD `.license` 包；
+`fetch-voice-models.sh` 依赖广荣服务器账号，未必随时可下）。
+2026-10-18 上级旧工作区（tts/tts2/macos-port/VVTTS.zip/HANDOFF.md）已清理：
+Android 侧素材以 `resources/reference/tts.apk`、Windows 侧以
+`resources/reference/grtts.nvda-addon` 为最终出处，需要时重新解包即可。
 
 ## 诊断
 

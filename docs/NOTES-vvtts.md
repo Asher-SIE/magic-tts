@@ -13,7 +13,7 @@
 | `lib/arm64-v8a/libq4.so` (2.1M, i386 静态 ELF, 未 strip) | 自制 daemon: PE 加载器 (`load_module_data`/`link_imports`) + zlib 解包器 (`unpack_container`/`inflate_raw`) + 协程调度 (`co_switch`/`co_schedule`), 尾部携带 ~1.9M 打包的 ViaVoice 引擎 |
 | `smali/com/vvtts/lan/VvttsTextToSpeechService` | Android TTS 服务: ProcessBuilder 拉 daemon、stdin/stdout 协议、看门狗; assets/nvda 标点词典做文本预处理 |
 
-## 二、解出的引擎 (→ `VVTTS/unpacked/`, 解包器逆向自 unpack_container)
+## 二、解出的引擎 (→ `resources/vvtts/unpacked/`, 解包器逆向自 unpack_container)
 
 | 文件 | 大小 | 角色 | 导出 |
 |---|---|---|---|
@@ -305,7 +305,7 @@ get/close ~20 个, chs50.syn 数据文件读取疑似走它) + torrent→ibmcmm 
 
 ### 对项目路线的影响
 - VVTTS 中文音色若与 Apple chs 同源 (极可能), "还原 VVTTS 听感" ≈ 调参数而非搬数据:
-  试听样本 VVTTS/sample_eddy_zh.aiff; KonaVoicePresets 的 pitchBase/speed 等可调
+  试听样本 resources/vvtts/sample_eddy_zh.aiff; KonaVoicePresets 的 pitchBase/speed 等可调
 - MagicTTS 集成最优解排序:
   1) 系统已自带该声音 → MagicTTS 可只做路由/包装 (甚至无需自研引擎)
   2) 直驱 chs.dylib (私有 API, 需攻克初始化序列) → 参数级控制
