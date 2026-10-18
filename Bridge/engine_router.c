@@ -222,6 +222,41 @@ void mtts_stream_cancel(mtts_stream *s) {
     if (s && s->a && s->a->stream_cancel) s->a->stream_cancel(s->impl);
 }
 
+/* 后台预热 "上次使用的语音" (Engines/.lastvoice, ms 适配器每次真实合成后
+ * 更新). 供 appex 启动早期调用: 读文件 → 定位引擎 → adapter->warm_voice.
+ * 沙盒外/守护进程上下文读不到 root 或文件 → 自然无操作.
+ * global_init 未跑时先补 (dlopen+scan ~63ms, 实测). */
+void mtts_warm_last_voice(void) {
+    pthread_mutex_lock(&g_lock);
+    const char *root = g_engines_root[0] ? g_engines_root : NULL;
+    int inited = g_inited;
+    pthread_mutex_unlock(&g_lock);
+    if (!root) return;
+    char path[1100], engine[64] = "", voice[256] = "";
+    snprintf(path, sizeof(path), "%s/.lastvoice", root);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[330] = "";
+    if (fgets(line, sizeof(line), f)) {
+        /* 格式: "engine voice" (ms_warm_voice 写入) */
+        sscanf(line, "%63s %255s", engine, voice);
+    }
+    fclose(f);
+    if (!engine[0]) return;
+    if (!inited) mtts_global_init(NULL);
+
+    pthread_mutex_lock(&g_lock);
+    const mtts_adapter_if *a = mtts_adapter_for(engine);
+    void *sess = NULL;
+    for (int i = 0; i < g_engine_count; i++)
+        if (strcmp(g_engines[i].desc.key, engine) == 0) {
+            if (g_engines[i].loaded && g_engines[i].session) sess = g_engines[i].session;
+            break;
+        }
+    pthread_mutex_unlock(&g_lock);
+    if (sess && a && a->warm_voice) a->warm_voice(sess, voice[0] ? voice : NULL);
+}
+
 void mtts_stream_free(mtts_stream *s) {
     if (!s) return;
     if (s->a && s->a->stream_free) s->a->stream_free(s->impl);

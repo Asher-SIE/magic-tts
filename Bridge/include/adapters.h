@@ -39,6 +39,11 @@ typedef struct mtts_adapter_if {
     void (*stream_free)(void *stream);
 
     void (*destroy)(void *session);
+
+    /* 可选: 后台预热某发音人 (建会话 + 一次微型合成, 读尽收尾, 绝不 stop).
+     * 真实 stream_start 到来时等待预热完成 (等待 ≤ 冷启成本, 永不亏).
+     * 适配器不支持时为 NULL. (2026-10-18: HD 模型冷启 ~650ms 的治理) */
+    void (*warm_voice)(void *session, const char *voice_key);
 } mtts_adapter_if;
 
 /* 按 key 取 adapter; 未适配的 key 返回 NULL. */

@@ -31,6 +31,33 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
         }
     }
 
+    /// 延迟探针: 请求到达 → 引擎首批样本可渲染 的全程耗时 (逐句, 上限 400 行轮转).
+    /// 读法: 首句 ~700ms+ = 冷推理 (每语音每进程一次), 之后 ~130-180ms = MS 热路径.
+    private static func probeLatency(_ ms: Double, engine: String, rate: Int32, text: String) {
+        probeWrite("first-sample=\(Int(ms))ms engine=\(engine) rate=\(rate) text=\(text)")
+    }
+
+    /// 延迟探针: 分段相位 (launch = mtts_stream_start 返回耗时).
+    private static func probePhase(_ phase: String, ms: Double, engine: String) {
+        probeWrite("\(phase)=\(Int(ms))ms engine=\(engine)")
+    }
+
+    private static func probeWrite(_ line: String) {
+        let dir = MagicPaths.enginesRoot.appendingPathComponent(".debug", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("latency.txt")
+        let full = "\(Date()) \(line)"
+        if let old = try? String(contentsOf: url, encoding: .utf8) {
+            var lines = old.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+            lines.append(full)
+            if lines.count > 400 { lines.removeFirst(lines.count - 400) }
+            try? lines.joined(separator: "\n").appending("\n").write(
+                to: url, atomically: true, encoding: .utf8)
+        } else {
+            try? full.appending("\n").write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
     // MARK: - 引擎桥 (C)
 
     private static let bridgeQueue = DispatchQueue(label: "magictts.bridge.init")
@@ -47,6 +74,14 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
             let ready = mtts_global_scan(root)
             NSLog("[MagicTTS] bridge scan: \(ready) 个引擎物料就绪")
             scanned = true
+            /* 后台预热上次使用的语音 (HD 模型冷启 ~650ms 治理):
+             * 守护进程上下文 scan=0 → 不触发 (重初始化红线);
+             * 合成宿主 → 会话+微型推理; 真实请求到来时等待而非打断. */
+            if ready > 0 {
+                DispatchQueue.global(qos: .utility).async {
+                    mtts_warm_last_voice()
+                }
+            }
         }
     }
 
@@ -74,6 +109,8 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
     private var pending = false                  // 请求已接受, 第 0 段未启动完
     private var cancelled = true
     private var dumpAudio = false                // .debug/dump 存在时写调试 WAV
+    private var reqStart: DispatchTime? = nil    // 延迟探针: 请求到达时刻 (状态锁保护)
+    private var probeSegIdx = -1                // 延迟探针: 已记录到第几段 (渲染线程)
 
     private let starterQueue = DispatchQueue(label: "magictts.segstart")
 
@@ -108,6 +145,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
     }
 
     deinit {
+        Self.probeMarkStatic("AU-deinit")
         for s in streams {
             if let s { mtts_stream_cancel(s); mtts_stream_free(s) }
         }
@@ -250,7 +288,6 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
         } else {
             newPlans = [SegPlan(engine: engineKey, voice: voiceKey, text: parsed.text,
                                 rate: Int32(parsed.rate), pitch: Int32(parsed.pitch), gain: 1.0)]
-            NSLog("[MagicTTS] synthesize engine=\(engineKey) voice=\(voiceKey ?? "(默认)") rate=\(parsed.rate) text=\(parsed.text.prefix(32))")
         }
 
         // 旧队列退休 (cancel 立即; 释放留给渲染线程, 避免与在途 read 竞争)
@@ -263,6 +300,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
         gen &+= 1
         cancelled = newPlans.isEmpty     // 空文本 → 渲染立即 Complete
         pending = !newPlans.isEmpty
+        reqStart = newPlans.isEmpty ? nil : .now()   // 延迟探针起点
         dumpAudio = FileManager.default.fileExists(
             atPath: MagicPaths.enginesRoot.appendingPathComponent(".debug/dump").path)
         if !newPlans.isEmpty {
@@ -303,6 +341,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
     /// 停止: 取消全部段.
     public override func cancelSpeechRequest() {
         NSLog("[MagicTTS] cancel")
+        Self.probeMarkStatic("cancel-request")
         stateLock.lock()
         cancelled = true
         pending = false
@@ -331,9 +370,18 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
             defer { stateLock.unlock() }
             return plans[idx]
         }()
+        let probeT0: DispatchTime? = {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            return reqStart
+        }()
         var sr: Int32 = 24000
         let st = mtts_stream_start(plan.engine, plan.voice, plan.text,
                                    plan.rate, plan.pitch, &sr)
+        if idx == 0, let t0 = probeT0 {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000
+            Self.probePhase("launch", ms: ms, engine: plan.engine)
+        }
         if st == nil {
             NSLog("[MagicTTS] 第 \(idx) 段启动失败 (engine=\(plan.engine) voice=\(plan.voice ?? "-"))")
         }
@@ -394,14 +442,19 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
             var isPending = self.pending
             var firstStarted = self.started.first ?? true
             let dump = self.dumpAudio
+            let probeT0 = self.reqStart                       // 延迟探针快照
+            let probeEngine = self.plans.first?.engine ?? "-"
+            let probeRate = self.plans.first?.rate ?? 0
+            let probeText = self.plans.first?.text ?? ""
             self.stateLock.unlock()
             for s in retiredNow { mtts_stream_free(s) }
 
-            /* 请求在途而第 0 段未启动 → 有界等待 (stream_start 毫秒级, MS 会话含复位拍) */
+            /* 请求在途而第 0 段未启动 → 有界等待 (4ms 粒度, 延迟治理: 原 20ms
+             * 轮询给稳态首样本白叠 0-20ms; stream_start 毫秒级, MS 会话含复位拍) */
             var waitedMs = 0
             while !isCancelled && isPending && !firstStarted && waitedMs < 15_000 {
-                usleep(20_000)
-                waitedMs += 20
+                usleep(4000)
+                waitedMs += 4
                 self.stateLock.lock()
                 isCancelled = self.cancelled
                 isPending = self.pending
@@ -423,6 +476,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
                 self.curRate = 24000
                 self.dumpActive = dump
                 self.dbg.removeAll(keepingCapacity: true)
+                self.probeSegIdx = -1
             }
 
             var step = self.curRate / self.outputBus.format.sampleRate
@@ -441,6 +495,12 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
                 let attempted = idx < self.started.count ? self.started[idx] : true
                 let gain = idx < self.plans.count ? self.plans[idx].gain : 1
                 let nextRate = self.rates.indices.contains(idx) ? self.rates[idx] : 24000
+                var segEngine = "-", segRate: Int32 = 0, segText = ""
+                if idx < self.plans.count {
+                    segEngine = self.plans[idx].engine
+                    segRate = self.plans[idx].rate
+                    segText = String(self.plans[idx].text.prefix(16))
+                }
                 self.stateLock.unlock()
 
                 if idx >= planCount { allDone = true; break }
@@ -471,6 +531,11 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
                 var done: Int32 = 0
                 let got = mtts_stream_read(st!, &scratch[total], Int32(needed - total), &done)
                 if got > 0 {
+                    if idx > self.probeSegIdx, let t0 = probeT0 {
+                        self.probeSegIdx = idx
+                        let ms = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000
+                        Self.probeLatency(ms, engine: segEngine, rate: segRate, text: segText)
+                    }
                     let base = total
                     self.srcBuf.reserveCapacity(self.srcBuf.count + Int(got))
                     for i in 0..<Int(got) {

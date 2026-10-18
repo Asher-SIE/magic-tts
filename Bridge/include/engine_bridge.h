@@ -82,6 +82,11 @@ int32_t mtts_stream_read(mtts_stream *s, int16_t *buf, int32_t want_samples,
 void mtts_stream_cancel(mtts_stream *s);
 void mtts_stream_free(mtts_stream *s);
 
+/* 后台预热 "上次使用的语音" (Engines/.lastvoice). appex 启动早期调用;
+ * 上下文读不到引擎目录 (语音目录守护进程) 或无记录 → 无操作.
+ * 预热绝不 stop; 真实请求到来时等待预热完成 (≤ 冷启成本). */
+void mtts_warm_last_voice(void);
+
 #ifdef __cplusplus
 }
 #endif

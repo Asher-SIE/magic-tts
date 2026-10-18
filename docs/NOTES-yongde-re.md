@@ -89,7 +89,17 @@ u32  reserved
 
 `Bridge/yongde_adapter.c`：.vl 整读 + pinyin.txt/phrases.txt 哈希 +
 词组最长匹配/单字首选读音 + ASCII/全角字母走字母槽 + 数字走 kDigits +
-标点走静音槽 + 直接拼接。（Sonic 变速二期；rate 暂不映射。）
+标点走静音槽 + 直接拼接。
+
+**二期（2026-10-18）rate/pitch 已接入（Sonic 后处理，对齐原版
+processSpeed）**：整段 PCM 拼接完成后过 Sonic —— 桥刻度 rate 20..500 →
+`sonicSetSpeed = rate/100`（变速不变调）；pitch 0..100 →
+`sonicSetPitch = 2^((pitch-50)/50)`（0.5..2.0，±1 八度，变调不变速）；
+常速常调位直通。数值验证：rate 50/200/400/500 时长比 1.995/0.499/0.246/
+0.197；同音节文本 r100/r200/r400 F0 均 320.0Hz（变速严格保调）；
+pitch 0/100 → F0 104/356Hz（约 ×0.5/×1.9）。Sonic 库 vendor 在
+`Bridge/sonic.{c,h}`（Apache 2.0，master 2026-10 快照），build-clt.sh
+经 `Bridge/*.c` 通配自动编入。
 
 **勘误①（F[er]）**：初版 F[er]=240 系网格解码串读（与 ou 混淆），实际 **239**。
 er 组基=1904，成员 1906/1907/1908=ér/ěr/èr(+2/+3/+4)，+0/+1 空（无 ēr）。
@@ -116,4 +126,5 @@ fiao/cei/din/bong/wong/nun/零声母eng，共 31 字 0.1%）→ 近似音节替�
 - 听审样本: /tmp/yongde_verify/（65 个, 命名 run槽tone）
 - RE 工具: radare2（brew）；反汇编片段 /tmp/synth.asm
 - 关键反汇编: VoiceLibrary::load @0x15474、synthesize @0x158a0（libyongde_tts.so）
-- Sonic 变速库: 开源（如 github.com/waywardgeek/sonic），适配器直接编入
+- Sonic 变速库: 已 vendor 到 Bridge/sonic.{c,h}（github.com/waywardgeek/sonic,
+  Apache 2.0）—— 二期已用, 见 §4b

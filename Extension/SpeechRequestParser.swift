@@ -15,6 +15,7 @@ struct SpeechRequestParser {
         var pitch = 50
 
         // <prosody rate="150%" pitch="+20%"> → 提取百分比
+        // (正则进程级缓存 — 每请求重编译是热路径纯浪费)
         if let r = firstMatch(ssml, pattern: "rate=\"([0-9]+)%\"") {
             rate = min(500, max(20, Int(r) ?? 100))
         } else if let r = firstMatch(ssml, pattern: "rate=\"([0-9.]+)\"") {
@@ -39,8 +40,17 @@ struct SpeechRequestParser {
         return Parsed(text: String(collapsed), rate: rate, pitch: pitch)
     }
 
+    private static var regexCache: [String: NSRegularExpression] = [:]
+    private static let regexLock = NSLock()
+
     private static func firstMatch(_ s: String, pattern: String) -> String? {
-        guard let re = try? NSRegularExpression(pattern: pattern),
+        let re: NSRegularExpression? = regexLock.withLock {
+            if let cached = regexCache[pattern] { return cached }
+            guard let compiled = try? NSRegularExpression(pattern: pattern) else { return nil }
+            regexCache[pattern] = compiled
+            return compiled
+        }
+        guard let re,
               let m = re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
               m.numberOfRanges > 1,
               let r = Range(m.range(at: 1), in: s) else { return nil }

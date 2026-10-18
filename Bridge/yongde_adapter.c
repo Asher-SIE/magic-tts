@@ -17,14 +17,21 @@
  *   voices/ydvoice00.vl  pinyin.txt  phrases.txt
  * (scripts/install-engines.sh 自动分发.)
  *
- * 一期: 直接拼接 + 标点停顿; rate/pitch 暂不映射 (Sonic 变速二期). */
+ * 二期: 直接拼接 + 标点停顿 + Sonic 后处理变速变调 (对齐原版
+ *   YongDeEngine::processSpeed(pcm, rate) → sonic 的做法):
+ *   桥刻度 rate 20..500 (100=常速) → sonicSetSpeed = rate/100 (变速不变调),
+ *   pitch 0..100 (50=常音高) → sonicSetPitch = 2^((pitch-50)/50) (±1 八度,
+ *   变调不变速). 常速常调时位直通, 不过 Sonic. */
 #include "adapters.h"
 
 #include <dirent.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "sonic.h"
 
 /* ---------- 编码表 (二进制提取, 权威) ---------- */
 typedef struct { const char *k; int v; } kv_t;
@@ -564,10 +571,47 @@ static const char *yd_voice_name(void *session, int idx) {
 }
 
 /* ---------- 流式合成 ---------- */
+
+/* Sonic 后处理 (对齐原版 processSpeed): 整段 PCM 变速/变调, 原地替换.
+ * speed = rate/100 (变速不变调, 0.2..5.0 在 Sonic 钳位 0.05..20 内);
+ * pitch 标量 = 2^((pitch-50)/50) → 0.5..2.0 (±1 八度, 变调不变速).
+ * 常速常调直接返回 (位直通); Sonic 失败保底输出原始音频. */
+static void yd_apply_prosody(pcmbuf *out, int rate, int pitch) {
+    if (rate <= 0) rate = 100;
+    if (pitch < 0) pitch = 0;
+    if (pitch > 100) pitch = 100;
+    float speed = rate / 100.0f;
+    float pscal = exp2f((pitch - 50) / 50.0f);
+    if (speed == 1.0f && pscal == 1.0f) return;
+
+    sonicStream st = sonicCreateStream(16000, 1);
+    if (!st) {
+        fprintf(stderr, "[MagicTTS][yongde] Sonic 流创建失败, 原样输出\n");
+        return;
+    }
+    sonicSetSpeed(st, speed);
+    sonicSetPitch(st, pscal);
+    sonicWriteShortToStream(st, out->p, (int)out->len);
+    sonicFlushStream(st);
+
+    pcmbuf res = {0};
+    short tmp[8192];
+    int n;
+    while ((n = sonicReadShortFromStream(st, tmp, (int)(sizeof(tmp) / sizeof(tmp[0])))) > 0)
+        pcm_append(&res, tmp, (size_t)n);
+    sonicDestroyStream(st);
+
+    if (res.p && res.len > 0) {
+        free(out->p);
+        *out = res;
+    } else {
+        free(res.p);   /* 空输出 (异常) → 保留原始音频 */
+    }
+}
+
 static void *yd_stream_start(void *session, const char *voice_key, const char *text,
                              int rate, int pitch, int32_t *out_sample_rate) {
     yd_ctx *c = session;
-    (void)rate; (void)pitch;
 
     pthread_mutex_lock(&c->lock);
 
@@ -598,6 +642,7 @@ static void *yd_stream_start(void *session, const char *voice_key, const char *t
     int rc = yd_walk_locked(c, text, &out);
     pthread_mutex_unlock(&c->lock);
     if (rc != 0) return NULL;
+    yd_apply_prosody(&out, rate, pitch);
 
     yd_stream *s = malloc(sizeof(*s));
     s->pcm = out.p;

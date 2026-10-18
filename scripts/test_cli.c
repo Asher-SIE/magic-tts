@@ -1,12 +1,12 @@
 /* 流式合成 CLI 测试: 列出发音人 / 指定发音人合成, 计量首块延迟.
  *
- * 编译 (在 scripts/ 下):
+ * 编译 (在 scripts/ 下; kona 为 ObjC, CLI 用桩替代):
  *   clang -O2 -I../Bridge/include -o /tmp/mtts_cli test_cli.c \
  *     ../Bridge/engine_router.c ../Bridge/yongde_adapter.c ../Bridge/ms_embedded_adapter.c \
- *     -lpthread -ldl
+ *     ../Bridge/sonic.c /tmp/kona_stub.c -lpthread -ldl
  * 用法:
  *   /tmp/mtts_cli                      # 列出全部引擎与发音人
- *   /tmp/mtts_cli <引擎key> [发音人key|序号] [文本]
+ *   /tmp/mtts_cli <引擎key> [发音人key|序号] [文本] [语速20-500] [音高0-100]
  */
 #include "engine_bridge.h"
 #include <execinfo.h>
@@ -87,9 +87,11 @@ int main(int argc, char **argv) {
 
     double t0 = now_ms();
     int32_t sr = 0;
-    mtts_stream *s = mtts_stream_start(key, voice, text, 100, 50, &sr);
-    printf("stream_start(%s, voice=%s) → %p 采样率=%d  启动耗时 %.1fms\n",
-           key, voice[0] ? voice : "(默认)", s, sr, now_ms() - t0);
+    int rate = argc > 4 ? atoi(argv[4]) : 100;
+    int pitch = argc > 5 ? atoi(argv[5]) : 50;
+    mtts_stream *s = mtts_stream_start(key, voice, text, rate, pitch, &sr);
+    printf("stream_start(%s, voice=%s, rate=%d, pitch=%d) → %p 采样率=%d  启动耗时 %.1fms\n",
+           key, voice[0] ? voice : "(默认)", rate, pitch, s, sr, now_ms() - t0);
     if (!s) return 1;
 
     /* 拉流 (模拟渲染: 每 512 样本一拉) */
@@ -113,7 +115,8 @@ int main(int argc, char **argv) {
 
     if (total > 0) {
         char out[300];
-        snprintf(out, sizeof(out), "/tmp/mtts_%s%s%s.wav", key, voice[0] ? "_" : "", voice);
+        snprintf(out, sizeof(out), "/tmp/mtts_%s%s%s_r%d_p%d.wav",
+                 key, voice[0] ? "_" : "", voice, rate, pitch);
         write_wav(out, pcm, total, sr);
         int peak = 0;
         for (int i = 0; i < total; i++) { int a = pcm[i] < 0 ? -pcm[i] : pcm[i]; if (a > peak) peak = a; }

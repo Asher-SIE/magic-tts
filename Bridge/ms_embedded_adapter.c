@@ -16,6 +16,11 @@
  *      → 流式 = start_speaking_ssml 立即返回 + 跟随 wav 文件增长读回,
  *        completed/canceled 回调 (arg1=synth 句柄, 不传 ctx!) 作结束信号.
  *      实测: 首块音频 ~0.75s 到达, 之后 ~1.7× 实时速率持续写入.
+ *   7. ★ 嵌入式 SDK 的 prosody rate 封顶 200% (2026-10-18 实测: r250/300/
+ *      400 与 r200 输出逐字节相同) → 桥 rate 20..500 = 引擎 min(rate,200)
+ *      原生跑 + 超出部分 Sonic 流式补速 (rate/200, 上限 2.5×), read 路径内
+ *      逐块过 Sonic, 不破坏流式;
+ *      SDK 写的 "wav" 实为无头裸 PCM (size = 样本×2), 直接喂 Sonic 无需去头.
  *
  * 布局: Engines/<key>/
  *   libMicrosoft.CognitiveServices.Speech.core.dylib (+embedded.tts/+onnxruntime)
@@ -33,6 +38,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#include "sonic.h"
 
 /* ★ 句柄为指针尺寸 (实测) */
 typedef void *ms_handle;
@@ -83,6 +90,9 @@ typedef struct ms_vsession {
     struct ms_stream *grave;   /* 待回收流 (回调可能仍持指针, 延迟到下次 start 销毁) */
     pthread_mutex_t lock;      /* 保护 active + 串行化该会话的 SDK 调用 */
     struct ms_stream *active;  /* 当前流 (回调目标) */
+    struct timespec settle_until;  /* stop 后的安全重启时刻 (CLOCK_MONOTONIC) */
+    int warming;               /* 后台预热进行中: stream_start 等待而非 stop */
+    pthread_cond_t warm_cond;  /* 预热完成通知 */
 } ms_vsession;
 
 struct ms_ctx {
@@ -108,9 +118,12 @@ struct ms_ctx {
     char ename[64];            /* 引擎显示名 (发音人名前缀) */
     char edir[1024];           /* Engines/<key> 绝对路径 */
     char vnames[MS_MAX_PKG][128];  /* 发音人显示名 */
+    char remembered[320];      /* 已记入 .lastvoice 的 "engine voice" (去重写盘) */
 };
 
-/* 流: 跟随 SDK 写的 wav 文件增长 */
+/* 流: 跟随 SDK 写的 wav 文件增长; rate>200% 时逐块过 Sonic 补速 */
+#define MS_ENGINE_RATE_MAX 200   /* 嵌入式 SDK prosody 封顶 (实测, 见头部注释 7) */
+#define MS_RAW_CHUNK 8192        /* 单轮文件读取的原始样本数 */
 struct ms_stream {
     ms_vsession *vs;
     struct ms_stream *next;    /* 墓园链 */
@@ -123,6 +136,9 @@ struct ms_stream {
     off_t stable_size;
     int stable_rounds;
     struct timespec last_growth;
+    sonicStream so;            /* 超出引擎上限部分的补速 (NULL = 不需要) */
+    int flushed;               /* 终局时已 sonicFlushStream */
+    int16_t raw[MS_RAW_CHUNK]; /* 喂 Sonic 的原始样本块 */
 };
 
 /* ---- synth 句柄 → 会话 注册表 (回调不传 ctx, 按 arg1 路由) ---- */
@@ -483,14 +499,19 @@ static void ms_on_canceled(ms_handle synth, ms_handle event) {
     (void)event;
 }
 
-/* 懒建发音人会话 (首次使用该发音人时) */
+/* 懒建发音人会话 (首次使用该发音人时); g_sess_lock 防预热线程与请求线程
+ * 并发双建 (pk->sess 检查-赋值非原子) */
+static pthread_mutex_t g_sess_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static ms_vsession *ms_get_session(ms_ctx *c, ms_pkg *pk) {
-    if (pk->sess) return pk->sess;
+    pthread_mutex_lock(&g_sess_lock);
+    if (pk->sess) { pthread_mutex_unlock(&g_sess_lock); return pk->sess; }
 
     ms_vsession *vs = calloc(1, sizeof(ms_vsession));
     vs->pkg = pk;
     vs->owner = c;
     pthread_mutex_init(&vs->lock, NULL);
+    pthread_cond_init(&vs->warm_cond, NULL);
 
     char *lic = ms_read_file(pk->licpath, NULL);
     if (!lic) { fprintf(stderr, "[MagicTTS][ms] license 读失败: %s\n", pk->licpath); goto fail; }
@@ -529,10 +550,13 @@ static ms_vsession *ms_get_session(ms_ctx *c, ms_pkg *pk) {
     ms_reg_add(vs->synth, vs);
     fprintf(stderr, "[MagicTTS][ms] 发音人会话就绪: %s (%s)\n", pk->dir, pk->voice);
     pk->sess = vs;
+    pthread_mutex_unlock(&g_sess_lock);
     return vs;
 fail:
+    pthread_cond_destroy(&vs->warm_cond);
     pthread_mutex_destroy(&vs->lock);
     free(vs);
+    pthread_mutex_unlock(&g_sess_lock);
     return NULL;
 }
 
@@ -551,8 +575,22 @@ static void xml_escape(const char *in, char *out, size_t cap) {
     out[o] = 0;
 }
 
+/* 延迟探针: stream_start 各相位耗时 → $TMPDIR/mtts_ms_lat.log */
+static void ms_lat_log(double t0, double t_sess, double t_reap, double t_settle) {
+    const char *tmp = getenv("TMPDIR");
+    char p[1100];
+    snprintf(p, sizeof(p), "%s/mtts_ms_lat.log", (tmp && tmp[0]) ? tmp : "/tmp");
+    FILE *f = fopen(p, "a");
+    if (!f) return;
+    fprintf(f, "start: total=%.0f (sess=%.0f reap=%.0f settle=%.0f launch=%.0f)\n",
+            now_ms_f() - t0, t_sess - t0, t_reap - t_sess, t_settle - t_reap,
+            now_ms_f() - t_settle);
+    fclose(f);
+}
+
 static void *ms_stream_start(void *session, const char *voice_key, const char *text,
                              int rate, int pitch, int32_t *out_sample_rate) {
+    double t0 = now_ms_f(), t_sess = t0, t_reap = t0, t_settle = t0;
     ms_ctx *c = session;
     ms_pkg *pk = &c->pkgs[0];
     if (voice_key && voice_key[0]) {
@@ -566,12 +604,15 @@ static void *ms_stream_start(void *session, const char *voice_key, const char *t
     }
 
     ms_vsession *vs = ms_get_session(c, pk);
+    t_sess = now_ms_f();
     if (!vs) return NULL;
 
-    /* SSML (prosody 语速/音高) */
+    /* SSML (prosody 语速/音高). 引擎 rate 封顶 200 (实测), 超出部分 Sonic 补速 */
     char esc[4096];
     xml_escape(text, esc, sizeof(esc));
     int r = rate < 20 ? 20 : (rate > 500 ? 500 : rate);
+    int er = r < MS_ENGINE_RATE_MAX ? r : MS_ENGINE_RATE_MAX;
+    float extra = er > 0 ? r / (float)er : 1.0f;
     int pd = (pitch - 50) * 2;
     if (pd < -100) pd = -100;
     if (pd > 100) pd = 100;
@@ -580,27 +621,74 @@ static void *ms_stream_start(void *session, const char *voice_key, const char *t
              "<speak version=\"1.0\" xml:lang=\"zh-CN\" "
              "xmlns=\"http://www.w3.org/2001/10/synthesis\">"
              "<voice name=\"%s\"><prosody rate=\"%d%%\" pitch=\"%+d%%\">%s</prosody></voice>"
-             "</speak>", pk->voice, r, pd, esc);
+             "</speak>", pk->voice, er, pd, esc);
 
     pthread_mutex_lock(&vs->lock);
     vs->got_real = 1;
+    while (vs->warming)                 /* 预热在途: 等它读完, 绝不打断 (ORT 红线) */
+        pthread_cond_wait(&vs->warm_cond, &vs->lock);
     ms_reap_graves(vs);
-    /* 在途流先取消 (其 reader 因 canceled 收尾) */
+    t_reap = now_ms_f();
+    /* 在途流先取消 (其 reader 因 canceled 收尾); 打断推理属 ORT 红线路径,
+     * 保留 stop + 短拍 — 但 old 已 completed (推理结束) 时免 stop 免拍.
+     * 空闲 (active==NULL) 直接 start — 旧版无条件 stop+150ms 拍的"空完成"
+     * 实为陈旧回调误判, 已由 read 的 off==0 守卫根治 (裸探针 3 轮验证). */
     if (vs->active) {
         struct ms_stream *old = vs->active;
         pthread_mutex_lock(&old->lock);
         old->canceled = 1;
+        int old_done = old->completed;
         pthread_mutex_unlock(&old->lock);
+        if (!old_done) {
+            c->stop(vs->synth);
+            clock_gettime(CLOCK_MONOTONIC, &vs->settle_until);
+            vs->settle_until.tv_nsec += 30 * 1000000L;
+            if (vs->settle_until.tv_nsec >= 1000000000L) {
+                vs->settle_until.tv_sec += 1;
+                vs->settle_until.tv_nsec -= 1000000000L;
+            }
+        }
     }
-    /* 每次 launch 前 stop + 复位拍: 实测 "读尽上一句后紧接 start_speaking"
-     * 会得到 0 字节空完成, 而句间 stop 后再 start 一切正常 (CLI/probe 交叉验证).
-     * 锁内串行 ⇒ 不存在并发推理, stop 安全 (ORT 崩只在并发时出现). */
-    c->stop(vs->synth);
-    usleep(150000);
+    /* stop (本函数或 cancel 路径) 之后须过结算窗口才重启 */
+    struct timespec nowts;
+    clock_gettime(CLOCK_MONOTONIC, &nowts);
+    if (nowts.tv_sec < vs->settle_until.tv_sec ||
+        (nowts.tv_sec == vs->settle_until.tv_sec &&
+         nowts.tv_nsec < vs->settle_until.tv_nsec)) {
+        long wait_us = (vs->settle_until.tv_sec - nowts.tv_sec) * 1000000L
+                     + (vs->settle_until.tv_nsec - nowts.tv_nsec) / 1000L;
+        pthread_mutex_unlock(&vs->lock);
+        if (wait_us > 0) usleep((useconds_t)wait_us);
+        pthread_mutex_lock(&vs->lock);
+    }
     struct ms_stream *st = ms_launch_locked(c, vs, ssml);
+    t_settle = now_ms_f();
+    if (st && extra > 1.001f) {
+        /* 流尚未返回给渲染线程 (vs->lock 仍持), 在此挂 Sonic 补速 */
+        st->so = sonicCreateStream(24000, 1);
+        if (st->so) sonicSetSpeed(st->so, extra);
+    }
     pthread_mutex_unlock(&vs->lock);
+    ms_lat_log(t0, t_sess, t_reap, t_settle);
     if (!st) return NULL;
     *out_sample_rate = 24000;
+
+    /* 记忆本语音 → Engines/.lastvoice (进程启动时据此后台预热, 见
+     * mtts_warm_last_voice); 仅变化时写盘 */
+    {
+        char combo[320];
+        snprintf(combo, sizeof(combo), "%s %s", c->key, pk->dir);
+        if (strcmp(c->remembered, combo) != 0) {
+            char p[1100];
+            const char *slash = strrchr(c->edir, '/');
+            if (slash) {
+                snprintf(p, sizeof(p), "%.*s/.lastvoice", (int)(slash - c->edir), c->edir);
+                FILE *f = fopen(p, "w");
+                if (f) { fprintf(f, "%s\n", combo); fclose(f); }
+                snprintf(c->remembered, sizeof(c->remembered), "%s", combo);
+            }
+        }
+    }
     return st;
 }
 
@@ -642,6 +730,16 @@ static int32_t ms_stream_read(void *stream, int16_t *buf, int32_t want, int *don
     int32_t got_total = 0;
 
     for (;;) {
+        /* 先排干 Sonic 已处理输出 (无 Sonic 时此步为空, 行为同旧版) */
+        if (st->so && got_total < want) {
+            int n = sonicReadShortFromStream(st->so, buf + got_total, want - got_total);
+            if (n > 0) got_total += n;
+        }
+        if (got_total >= want) {
+            if (done) *done = 0;   /* 本次读满; 是否结束下次读时判断 */
+            return got_total;
+        }
+
         struct stat sb;
         off_t size = 0;
         if (fstat(st->fd, &sb) == 0) size = sb.st_size;
@@ -652,20 +750,30 @@ static int32_t ms_stream_read(void *stream, int16_t *buf, int32_t want, int *don
         pthread_mutex_unlock(&st->lock);
 
         if (avail >= 2) {
-            ssize_t want_bytes = (off_t)want * 2 - got_total * 2;
+            /* 原始样本: 无 Sonic 直拷; 有 Sonic 过流 (循环顶再取回处理后的) */
+            if (!st->so) {
+                ssize_t want_bytes = (off_t)want * 2 - got_total * 2;
+                if (want_bytes > avail) want_bytes = avail;
+                want_bytes &= ~((ssize_t)1);
+                ssize_t n = pread(st->fd, (uint8_t *)buf + got_total * 2,
+                                  want_bytes, st->off);
+                if (n > 0) {
+                    st->off += n;
+                    got_total += (int32_t)(n / 2);
+                    clock_gettime(CLOCK_MONOTONIC, &st->last_growth);
+                    st->stable_rounds = 0;
+                }
+                continue;
+            }
+            ssize_t want_bytes = (off_t)sizeof(st->raw);
             if (want_bytes > avail) want_bytes = avail;
             want_bytes &= ~((ssize_t)1);
-            ssize_t n = pread(st->fd, (uint8_t *)buf + got_total * 2,
-                              want_bytes, st->off);
+            ssize_t n = pread(st->fd, st->raw, want_bytes, st->off);
             if (n > 0) {
                 st->off += n;
-                got_total += (int32_t)(n / 2);
                 clock_gettime(CLOCK_MONOTONIC, &st->last_growth);
                 st->stable_rounds = 0;
-            }
-            if (got_total >= want) {
-                if (done) *done = 0;   /* 本次读满; 是否结束下次读时判断 */
-                return got_total;
+                sonicWriteShortToStream(st->so, st->raw, (int)(n / 2));
             }
             continue;
         }
@@ -684,7 +792,14 @@ static int32_t ms_stream_read(void *stream, int16_t *buf, int32_t want, int *don
                 }
             }
             if (st->stable && st->off >= st->stable_size) {
-
+                if (st->so) {
+                    if (!st->flushed) {
+                        sonicFlushStream(st->so);   /* 终局: 冲出残余 */
+                        st->flushed = 1;
+                        continue;
+                    }
+                    if (sonicSamplesAvailable(st->so) > 0) continue;
+                }
                 if (done) *done = 1;
                 return got_total;
             }
@@ -700,6 +815,11 @@ static int32_t ms_stream_read(void *stream, int16_t *buf, int32_t want, int *don
         if (ms > 20000) {
             fprintf(stderr, "[MagicTTS][ms] 流无进展超 %.1fs, 放弃 (completed=%d)\n",
                     ms / 1000.0, completed);
+            if (st->so && !st->flushed) {
+                sonicFlushStream(st->so);
+                st->flushed = 1;
+                continue;
+            }
             if (done) *done = 1;
             return got_total;
         }
@@ -712,13 +832,25 @@ static void ms_stream_cancel(void *stream) {
     if (!st) return;
     pthread_mutex_lock(&st->lock);
     st->canceled = 1;
+    int was_completed = st->completed;
     pthread_mutex_unlock(&st->lock);
 
     ms_vsession *vs = st->vs;
     pthread_mutex_lock(&vs->lock);
     if (vs->active == st) {
         vs->active = NULL;          /* 摘除: 回调不再触达该流 */
-        if (vs->stop) vs->stop(vs->synth);   /* 终止后台合成 */
+        /* completed=1 → 推理早已结束, 无需 stop (系统播完照例 cancel 一次,
+         * 无脑 stop 会设 50ms 结算窗, 下一句白付 ~54ms — 2026-10-18 实测);
+         * 仅真正打断在途推理 (completed=0) 才 stop + 结算窗 (ORT 红线). */
+        if (!was_completed) {
+            if (vs->stop) vs->stop(vs->synth);   /* 终止后台合成 */
+            clock_gettime(CLOCK_MONOTONIC, &vs->settle_until);
+            vs->settle_until.tv_nsec += 50 * 1000000L;
+            if (vs->settle_until.tv_nsec >= 1000000000L) {
+                vs->settle_until.tv_sec += 1;
+                vs->settle_until.tv_nsec -= 1000000000L;
+            }
+        }
     }
     pthread_mutex_unlock(&vs->lock);
 }
@@ -734,23 +866,90 @@ static void ms_stream_free(void *stream) {
     vs->grave = st;            /* 延迟到下次 stream_start 真正销毁 */
     pthread_mutex_unlock(&st->lock);
     pthread_mutex_unlock(&vs->lock);
+    if (st->so) sonicDestroyStream(st->so);
+    st->so = NULL;             /* 墓园期 read 不再触碰 (free 后本就该无 read) */
     close(st->fd);
 }
 
-/* 墓园回收 (stream_start 持 vs->lock 时调用): 距入墓已隔一次完整启动,
- * 在途回调必已离开; 保险再等一拍. */
+/* 墓园回收 (stream_start 持 vs->lock 时调用): 锁握手即内存栅栏 — 回调须持
+ * st->lock 才触碰墓园流, 握手后必已离开, 无需睡眠等待 (2026-10-18 延迟治理:
+ * 原每具 20/100ms 串行睡眠是稳态延迟主源之一, 积压时叠加至上百 ms). */
 static void ms_reap_graves(ms_vsession *vs) {
     while (vs->grave) {
         struct ms_stream *g = vs->grave;
         vs->grave = g->next;
-        pthread_mutex_unlock(&vs->lock);
-        usleep(100000);
         pthread_mutex_lock(&g->lock);
         pthread_mutex_unlock(&g->lock);
         pthread_mutex_destroy(&g->lock);
         free(g);
-        pthread_mutex_lock(&vs->lock);
     }
+}
+
+/* ---------- 安全后台预热 (2026-10-18) ----------
+ * HD 模型冷启 ~650ms (加载+首推理, 每会话私有, 跨会话不共享 — 实测).
+ * 预热 = 一次微型合成跑完整 launch→读尽→入墓 循环, 全程绝不 stop
+ * (ORT 红线: stop 打断推理会僵死全局). 真实 stream_start 到来时在
+ * vs->lock 上等 warming 结束 — 等待 ≤ 冷启成本, 任何时序都不亏. */
+static void ms_warm_session(ms_ctx *c, ms_vsession *vs) {
+    pthread_mutex_lock(&vs->lock);
+    if (vs->got_real || vs->active || vs->warming || vs->warmed) {
+        pthread_mutex_unlock(&vs->lock);
+        return;
+    }
+    vs->warming = 1;
+    char ssml[512];
+    snprintf(ssml, sizeof(ssml),
+             "<speak version=\"1.0\" xml:lang=\"zh-CN\" "
+             "xmlns=\"http://www.w3.org/2001/10/synthesis\">"
+             "<voice name=\"%s\">嗯。</voice></speak>", vs->pkg->voice);
+    struct ms_stream *st = ms_launch_locked(c, vs, ssml);
+    pthread_mutex_unlock(&vs->lock);
+    if (st) {
+        int16_t sink[512];
+        int done = 0;
+        while (!done) {
+            if (ms_stream_read(st, sink, 512, &done) == 0 && !done) usleep(10000);
+        }
+        ms_stream_free(st);          /* 入墓园, 下次 stream_start 统一销毁 */
+        fprintf(stderr, "[MagicTTS][ms] 预热完成 %s\n", vs->pkg->dir);
+    }
+    pthread_mutex_lock(&vs->lock);
+    vs->warmed = st != NULL;
+    vs->warming = 0;
+    pthread_cond_broadcast(&vs->warm_cond);
+    pthread_mutex_unlock(&vs->lock);
+}
+
+struct ms_warm_arg { ms_ctx *c; ms_vsession *vs; };
+
+static void *ms_warm_voice_thread(void *p) {
+    struct ms_warm_arg *a = p;
+    ms_warm_session(a->c, a->vs);
+    free(a);
+    return NULL;
+}
+
+/* adapter 钩子: 后台预热某发音人 (voice_key 空 = 引擎默认) */
+static void ms_warm_voice(void *session, const char *voice_key) {
+    ms_ctx *c = session;
+    ms_pkg *pk = &c->pkgs[0];
+    if (voice_key && voice_key[0]) {
+        int hit = 0;
+        for (int i = 0; i < c->npkg; i++)
+            if (strcmp(c->pkgs[i].dir, voice_key) == 0) { pk = &c->pkgs[i]; hit = 1; break; }
+        if (!hit) return;
+    }
+    ms_vsession *vs = ms_get_session(c, pk);   /* 沙盒/物料异常 → NULL 自然放弃 */
+    if (!vs) return;
+    struct ms_warm_arg *a = malloc(sizeof(*a));
+    if (!a) return;
+    a->c = c; a->vs = vs;
+    pthread_t th;
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&th, &at, ms_warm_voice_thread, a) != 0) free(a);
+    pthread_attr_destroy(&at);
 }
 
 static void ms_destroy(void *session) {
@@ -760,6 +959,7 @@ static void ms_destroy(void *session) {
         ms_vsession *vs = c->pkgs[i].sess;
         if (vs) {
             if (vs->synth) c->release_synth(vs->synth);
+            pthread_cond_destroy(&vs->warm_cond);
             pthread_mutex_destroy(&vs->lock);
             free(vs);
         }
@@ -773,6 +973,7 @@ static const mtts_adapter_if kMsAdapter = {
     ms_voice_count, ms_voice_key, ms_voice_name,
     ms_stream_start, ms_stream_read, ms_stream_cancel, ms_stream_free,
     ms_destroy,
+    ms_warm_voice,
 };
 const mtts_adapter_if *mtts_ms_adapter(void) { return &kMsAdapter; }
 
