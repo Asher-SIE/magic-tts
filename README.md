@@ -92,33 +92,26 @@ open -a ~/Applications/MagicTTS.app       # 启动即刷新发音人注册
 
 ## 项目内资源（自包含，不再依赖旧工作区素材）
 
-> VVTTS 素材（IBM ViaVoice 中文引擎）调研完结：全套素材在 `resources/vvtts/`，
-> 本体已解出至 `resources/vvtts/unpacked/`（6 个 i386 PE DLL，CRC 全过），解包器与格式笔记见
-> `tools/unpack_vvtts.py` 与 `docs/NOTES-vvtts.md`。集成需 yongde 式逆向
-> 重写（数周级），暂未立项——细节、利弊与建议次序都在 NOTES 里。
+> VVTTS（IBM ViaVoice 中文引擎）调研完结，集成已被 Kona 直驱取代；素材
+> （APK/apktool 树/解出的 6 个 i386 PE DLL/听感样本）已随 2026-10-18 工作区
+> 清理删除，复盘需重新获取 VVTTS APK 并用 `tools/unpack_vvtts.py` 重解——
+> 容器格式与全部结论见 `docs/NOTES-vvtts.md`。
 
 ```
 resources/
 ├── yongde/
 │   ├── voices/ydvoice00-04.vl   # 全部 5 个音色语音库 (~51M, 未入 git)
-│   ├── pinyin.txt / phrases.txt # 拼音词典
-│   └── libyongde_tts.so         # Android arm64 引擎本体 (二期逆向参考: Sonic 变速/多音色)
-├── vvtts/                       # VVTTS 全套素材 (38M, 未入 git): 原始 APK + apktool 树
-│                                #   + unpacked/ 6 个解出的 i386 PE 引擎 (唯一副本) + 听感样本
-├── ms-voices/                   # NeuralVoices 微软语音包离线备份 (1.4G, 14 包 / 7 个 license 型, 未入 git)
-└── reference/
-    ├── tts.apk                  # 原始 APK (347M, 未入 git) — Android 侧素材的最终出处
-    ├── grtts.nvda-addon         # Windows NVDA 插件原始包 (152M, 未入 git) — Windows 侧源档
-    └── restored*/               # Android 调用链 Java 还原源 (注释出处引用)
+│   └── pinyin.txt / phrases.txt # 拼音词典
+└── ms-voices/                   # NeuralVoices 微软语音包离线备份 (1.4G, 14 包 / 7 个 license 型, 未入 git)
 ```
 
 永德数据以 `resources/yongde` 为权威源，`populate-engines.sh` 默认从这里安装；
 MS 引擎数据体量大（容器内现 924M），运行态由容器 + 下载脚本承担，语音包离线
 备份在 `resources/ms-voices/NeuralVoices/`（含 7 个 HD `.license` 包；
 `fetch-voice-models.sh` 依赖广荣服务器账号，未必随时可下）。
-2026-10-18 上级旧工作区（tts/tts2/macos-port/VVTTS.zip/HANDOFF.md）已清理：
-Android 侧素材以 `resources/reference/tts.apk`、Windows 侧以
-`resources/reference/grtts.nvda-addon` 为最终出处，需要时重新解包即可。
+2026-10-18 工作区收敛至本仓库：反编译树/其他平台包/APK/引擎二进制
+（tts.apk、grtts.nvda-addon、VVTTS 素材、libyongde_tts.so 等）已删除，
+仅保留运行所需语音数据；逆向结论以 docs/ 与 git 历史为准。
 
 ## 诊断
 

@@ -14,7 +14,7 @@ DST="${2:-$HOME/Library/Containers/com.magictts.voices.synth/Data/Engines}"
 
 mkdir -p "$DST"
 
-# —— 永德: 项目资源 (5 个 .vl 音色 + 词典 + 引擎 .so 参考) ——
+# —— 永德: 项目资源 (5 个 .vl 音色 + 词典) ——
 if [ -d "$PROJ/resources/yongde/voices" ]; then
     rm -rf "$DST/yongde"
     cp -Rc "$PROJ/resources/yongde" "$DST/yongde"
