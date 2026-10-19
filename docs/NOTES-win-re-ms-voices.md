@@ -214,3 +214,54 @@ NOTES-ms-streaming.md 原判（流水线掩盖 / 配非 HD）。
 macOS 实现的两处真实偏差（.key 凭证格式、add_path 路径粒度）已在上一提交
 修正；其余差异属合理平台适配。剩余不确定性收敛为一项：**公开 1.48.2 对
 `Key:` 前缀约定的支持**，实验清单 #1/#4 直接回答。
+
+## 8. macOS 1.48.2 静态复核 — Key: 支持证实 / INI 线索排除（2026-10-19，pull 后）
+
+在本地已装 SDK（Engines/onecore 的 4 个 dylib，1.48.2）上静态验证，
+回答 §7.4 的悬置项并检验 §3 的 INI 假设：
+
+### 8.1 `Key:` 前缀约定在 1.48.2 存在（实验 #1 静态前置通过）
+
+- embedded.tts.dylib 反汇编（otool -tv）搜立即数 0x3A79654B（小端 `"Key:"`；
+  4 字节恰可编为单条 movz/movk 立即数，**故 strings 搜不到** — 排查时勿以
+  strings 空手判死）：命中 6 处 — 0x3a0d98 / 0x3a64ac / 0x3a8764 / 0x3a9b10 /
+  0x3ad130 / 0x3ba208；
+- 逐处看上下文均为静态组件注册块（`strb 4`=串长 + __cxa_atexit 挂接），
+  首处（0x3a0d60–0x3a0dbc）同块还有 "TTST"（0x54545354）与 "MicrosoftTTS"
+  字面量 — 与 §6 Windows 侧 0x18000123a 一带的组件注册同构；
+- 配套件齐：`##Encrypted##` / `AESGCMEncryptionEngine` / `WRONG_DECRYPTION_KEY`
+  / `INVALID_LICENSE` 字符串均在 embedded.tts（core.dylib 的 "Key:" 唯一命中
+  是 Sec-WebSocket-Key 头，无关）。
+
+判定：公开 1.48.2 保留 OneCore `Key:` 解密路径；实验 #1 大概率通过，
+#4（降级 1.45.x）大概率不需要。动态实测仍待做（拷 .key 包入
+Engines/<key>/model + 重装即触发）。
+
+### 8.2 INI 调优键在 1.48.2 全缺 — §3 的 SeqLen 线索对 macOS 不成立
+
+4 个 dylib（core / embedded.tts / onnxruntime / kws.ort）二进制 grep 均无：
+HDVoiceSeqLen / EnableBuffer / BatchSize / EnableThrottling / EnableHDVoice /
+HDAMModelPath / HDVocoderModelPath / HDVoiceThreshold，甚至无 ".INI" 字符串
+（"Tokens.xml" 在 embedded.tts 有）。这些键名 13+ 字符不可能编为立即数，
+只能是 rodata 字符串，缺失即代码不存在。
+
+判定：1.48.2 公开版不读 `<LCID>.INI`；叶子目录 add_path 与 Windows 对齐
+无害且更正确，但对 HD 首块延迟没有 INI 层面的影响。HD ~120ms 台阶延迟
+在 1.48.2 上大概率仍是该构建的内在成本（NOTES-ms-streaming 原判大概率成立），
+实验 #2 复测预期无变化，仅作闭环。Windows 侧无此惩罚的差异归因于
+1.45.0 内部构建含 INI 调优管线（SeqLen=5 等），公开版裁掉了。
+
+### 8.3 模型物料加密形态（resources/ms-voices 本地复核）
+
+- .key 包（云希）am_v5_encoder.bin 头部即高熵密文；.license 包（Eric）同名
+  文件开头是明文许可声明（"This model and the software may not be used…"）；
+  两包全部文件均无 `##Encrypted##` 标记 → 加密差异在模型本体，引擎按凭证
+  前缀选解密 / 明文+license 校验两条路，与 §2 分流结论互证；
+- 7 个 SynthModel.key md5 全同（bde0ab81…），内容与 §0 主密钥逐字节一致；
+  license 仅两种文本（HD 组 / 新 Natural 组），各 721 字节 — §0 盘点全数对上。
+
+### 8.4 实验清单修订
+
+- #1：静态证据已过，只待动态实测；
+- #2：预期无变化（§8.2），保留作闭环；
+- #4：大概率不需要，降为 #1 失败时才做。
