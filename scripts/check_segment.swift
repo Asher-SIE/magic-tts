@@ -107,7 +107,36 @@ enum CheckSegmentMain {
         expect("coalesce全并", s11 == [TextSegment(text: "中文 English 中文", target: .primary)],
                "\(s11)")
 
-        // 12. 空文本
+        // —— 编程标识符拆词 (normalize 内置) ——
+        // 13. 拆词矩阵: 驼峰/下划线/连字符/数字边界
+        let m: [(String, String)] = [
+            ("AppleConnectMenu", "Apple Connect Menu"),
+            ("user_name", "user name"),
+            ("my-cool-var", "my cool var"),
+            ("HTTPServer", "HTTP Server"),
+            ("iOS12", "i OS 12"),
+            ("mp3player", "mp 3 player"),
+            ("state-of-the-art", "state of the art"),
+            ("__init__", " init "),            ("NVDA", "NVDA"),
+            ("A.txt", "A.txt"),
+            ("2024-2025", "2024-2025"),
+            ("-5", "-5"),
+            ("你好世界", "你好世界"),
+        ]
+        for (src, want) in m {
+            let got = TextSegmenter.splitIdentifiers(src)
+            expect("拆词 \(src)", got == want, "得到 \"\(got)\"")
+        }
+
+        // 14. 拆词进切段: "AppleConnectMenu 状态菜单" → 英文词组 + 中文两段
+        opt.letterCase = .none
+        let s14 = TextSegmenter.segment("AppleConnectMenu 状态菜单", options: opt)
+        expect("拆词切段",
+               s14 == [TextSegment(text: "Apple Connect Menu ", target: .secondary),
+                       TextSegment(text: "状态菜单", target: .primary)],
+               "\(s14)")
+
+        // 15. 空文本
         expect("空文本", TextSegmenter.segment("", options: opt).isEmpty)
 
         if g_fail == 0 {

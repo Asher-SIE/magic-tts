@@ -54,7 +54,7 @@ struct TextSegment: Equatable {
 }
 
 /// 文本分发规则层 — 策略全部集中于此, 便于按特殊情况逐条增改:
-///   1. normalize()  — 预处理 (替换/清洗, 目前仅去首尾空白)
+///   1. normalize()  — 预处理: 编程标识符拆词 (驼峰/下划线/连字符/数字边界补空格)
 ///   2. splitRuns()  — 按字符类别切成原子 run (CJK / 拉丁 / 数字 / 中性)
 ///   3. route()      — 拉丁聚短语判词数、孤立字母、数字归属 → 主/副/待并入;
 ///                     大小写字母处理 (前缀改写 / 音高变体打标) 也在此步
@@ -74,8 +74,51 @@ enum TextSegmenter {
 
     // MARK: 1. 预处理
 
+    /// 编程标识符拆词 (朗读正确性): 驼峰/下划线/连字符/字母↔数字边界补空格,
+    /// 否则整串送合成器会连读 ("AppleConnectMenu" / "user_name" / "my-cool-var")。
+    /// 缩写与数值不受影响 (NVDA / A.txt / 2024-2025 / -5 原样)。
+    static func splitIdentifiers(_ s: String) -> String {
+        let chars = Array(s)
+        func isL(_ c: Character) -> Bool {
+            guard let v = c.unicodeScalars.first?.value else { return false }
+            return (0x41...0x5A).contains(v) || (0x61...0x7A).contains(v)
+        }
+        func isU(_ c: Character) -> Bool {
+            guard let v = c.unicodeScalars.first?.value else { return false }
+            return (0x41...0x5A).contains(v)
+        }
+        func isD(_ c: Character) -> Bool {
+            guard let v = c.unicodeScalars.first?.value else { return false }
+            return (0x30...0x39).contains(v)
+        }
+        var out = ""
+        func push(_ c: Character) {
+            if c == " ", out.last == " " { return }   // 折叠连续空格
+            out.append(c)
+        }
+        for (i, ch) in chars.enumerated() {
+            let prev = i > 0 ? chars[i - 1] : nil
+            let next = i + 1 < chars.count ? chars[i + 1] : nil
+            if ch == "_" { push(" "); continue }
+            if ch == "-", let p = prev, let n = next, isL(p), isL(n) {
+                push(" "); continue
+            }
+            if isL(ch) {
+                if let p = prev, isL(p) {
+                    if isU(ch), !isU(p) { push(" ") }                     // 小写→大写
+                    else if isU(ch), isU(p), let n = next, isL(n), !isU(n) { push(" ") }  // 大写串末接小写
+                }
+                if let p = prev, isD(p) { push(" ") }                      // 数字→字母
+            } else if isD(ch) {
+                if let p = prev, isL(p) { push(" ") }                      // 字母→数字
+            }
+            push(ch)
+        }
+        return out
+    }
+
     static func normalize(_ s: String) -> String {
-        s.trimmingCharacters(in: .whitespacesAndNewlines)
+        splitIdentifiers(s.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     // MARK: 2. 原子 run

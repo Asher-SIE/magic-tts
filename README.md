@@ -52,6 +52,11 @@ TTS 引擎注册为系统语音（VoiceOver / 朗读内容 / `say` 均可用）�
 - **分发规则**：`Shared/TextSegmenter.swift`（normalize → splitRuns → route →
   attach → merge 五段流水，特殊情况在此按条增改）；规则开关随 scheme.json 持久化，
   孤立字母默认归**第二引擎**（`isolatedLetterToPrimary` 可切主侧）。
+- **内置标识符拆词**（normalize 阶段，全部语音路径生效）：编程标识符在送合成器前
+  补空格，避免整串连读——驼峰（`AppleConnectMenu` → `Apple Connect Menu`，
+  `HTTPServer` → `HTTP Server`）、下划线（`user_name` → `user name`）、字母间连字符
+  （`my-cool-var` → `my cool var`）、字母↔数字边界（`iOS12` → `i OS 12`）。
+  缩写与数值不动（`NVDA` / `A.txt` / `2024-2025` / `-5` 原样）。
 - **参数完全 MagicTTS 托管**：方案语音忽略请求里的 prosody（VO 面板对方案本就
   无效），语速/音高/音量两侧各自独立，音量 = 渲染级逐样本增益（0-200%，兼做
   响度归一；>100% 可能削顶）。

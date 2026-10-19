@@ -305,7 +305,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
             NSLog("[MagicTTS] scheme=\(slot) 主=\(p.engine) 副=\(s.engine) 二语音=\(scheme.useSecondary) → \(newPlans.count) 段 text=\(text.prefix(32))")
         } else {
             /* 普通引擎语音: 全局规则直接应用 (规则本身可逐条停用) */
-            let text = RuleStore.shared().apply(parsed.text)
+            let text = TextSegmenter.splitIdentifiers(RuleStore.shared().apply(parsed.text))
             newPlans = [SegPlan(engine: engineKey, voice: voiceKey, text: text,
                                 rate: Int32(parsed.rate), pitch: Int32(parsed.pitch), gain: 1.0)]
         }
