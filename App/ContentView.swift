@@ -32,9 +32,6 @@ struct SchemeRow: View {
     let slot: String
     let scheme: Scheme
     let voices: [VoiceOption]
-    var selected: Bool = false
-    var onTap: () -> Void = {}
-    var onDoubleTap: () -> Void = {}
 
     private func sideDesc(_ c: SchemeVoiceConfig) -> String {
         if let hit = voices.first(where: { $0.engine == c.engine && $0.key == c.voice && !c.voice.isEmpty }) {
@@ -62,11 +59,7 @@ struct SchemeRow: View {
         }
         .padding(.vertical, 6).padding(.horizontal, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(selected ? Color.accentColor.opacity(0.15) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
-        .onTapGesture(count: 2, perform: onDoubleTap)
-        .onTapGesture(count: 1, perform: onTap)
     }
 }
 
@@ -339,27 +332,22 @@ struct ContentView: View {
         }
     }
 
-    /// 上方方案区: 左列表 (单击选中, 双击编辑) + 右侧管理按钮
+    /// 上方方案区: 左列表 (原生选中, 方向键/旁观光标走到哪行就选中哪行, 双击编辑) + 右侧管理按钮
     private var schemePanel: some View {
         HStack(alignment: .top, spacing: 12) {
-            ScrollView {
-                VStack(spacing: 0) {
-                    if orderedSlots.isEmpty {
-                        Text("暂无方案，点「新增」创建。")
-                            .font(.caption).foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(8)
-                    }
-                    ForEach(orderedSlots, id: \.self) { slot in
-                        SchemeRow(slot: slot, scheme: schemes[slot]!, voices: voiceOptions,
-                                  selected: selectedSlot == slot,
-                                  onTap: { selectedSlot = slot },
-                                  onDoubleTap: { openEditor(slot) })
-                    }
+            List(selection: $selectedSlot) {
+                if orderedSlots.isEmpty {
+                    Text("暂无方案，点「新增」创建。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(orderedSlots, id: \.self) { slot in
+                    SchemeRow(slot: slot, scheme: schemes[slot]!, voices: voiceOptions)
+                        .tag(slot)
+                        .onTapGesture(count: 2) { openEditor(slot) }
                 }
             }
+            .listStyle(.inset)
             .frame(minHeight: 96, maxHeight: 176)
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary, lineWidth: 1))
 
             VStack(spacing: 8) {
                 Button("新增") {
