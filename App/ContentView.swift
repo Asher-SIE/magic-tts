@@ -358,6 +358,7 @@ struct ContentView: View {
                 Button("编辑") {
                     if let slot = selectedSlot { openEditor(slot) }
                 }
+                .keyboardShortcut(.defaultAction)
                 .disabled(selectedSlot == nil)
                 Button("删除") { confirmDelete = true }
                     .disabled(selectedSlot == nil)
