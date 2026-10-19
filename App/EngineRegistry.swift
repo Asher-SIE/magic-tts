@@ -8,6 +8,7 @@ struct VoiceRow: Identifiable {
     let engineName: String
     let key: String                  // 发音人选择键 (ydvoice01 / 包目录名)
     let name: String                 // 显示名 "永德·语音1"
+    let locale: String               // 发音人语言 BCP-47 (MS 包可为 zh-TW/en-US, 永德恒 zh-CN)
     let identifier: String           // 引擎内部语音 id: com.magictts.<engine>.<key>
     var id: String { identifier }
 }
@@ -52,6 +53,7 @@ enum EngineRegistry {
                     engineName: String(cString: desc.voice_name),
                     key: String(cString: vd.pointee.key),
                     name: String(cString: vd.pointee.name),
+                    locale: String(cString: vd.pointee.locale),
                     identifier: String(cString: vd.pointee.identifier)))
             }
             out.append(EngineStatus(

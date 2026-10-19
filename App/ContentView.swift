@@ -234,10 +234,22 @@ struct ContentView: View {
         for e in engines {
             out.append(VoiceOption(engine: e.key, key: "", label: "自动 · \(e.name)"))
             for v in e.voices {
-                out.append(VoiceOption(engine: e.key, key: v.key, label: v.name))
+                out.append(VoiceOption(engine: e.key, key: v.key, label: voiceLabel(v)))
             }
         }
         return out
+    }
+
+    /// 发音人显示名后追加语言说明 (如 "OneCore·晓晓 Chinese");
+    /// 名称已带语言的 (Kona "Eddy·中文") 不重复追加
+    private func voiceLabel(_ v: VoiceRow) -> String {
+        let word: String
+        if v.locale.hasPrefix("zh") { word = "Chinese" }
+        else if v.locale.hasPrefix("yue") { word = "Cantonese" }
+        else if v.locale.hasPrefix("en") { word = "English" }
+        else { return v.name }
+        if v.name.contains(word) || v.name.contains("中文") || v.name.contains("英文") { return v.name }
+        return "\(v.name) \(word)"
     }
 
     private var orderedSlots: [String] {
