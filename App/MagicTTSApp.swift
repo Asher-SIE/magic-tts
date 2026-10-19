@@ -35,7 +35,9 @@ struct MagicTTSApp: App {
     }
 
     var body: some Scene {
-        WindowGroup { ContentView() }
+        // Window 单窗口场景: 不提供 Cmd+N/多窗口, 重开 app = 激活现有窗口
+        // (WindowGroup 允许多窗口, 状态恢复曾带回两个主界面)
+        Window("Magic TTS", id: "main") { ContentView() }
             .windowResizability(.contentSize)
     }
 }
