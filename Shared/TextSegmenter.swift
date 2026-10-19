@@ -9,8 +9,9 @@ enum SegmentTarget {
 
 // MARK: - 规则参数 (随 scheme.json 持久化)
 
-/// 大小写字母处理 — 作用于"孤立的单个大写字母" (含拼读拆出的字母):
-/// 不分侧, 字母读给哪侧就在哪侧处理; 前缀措辞按该侧语言由用户选择。
+/// 大小写字母处理 — 仅在"整句就是单个大写字母"时生效 (朗读单独字符场景,
+/// 如 VO 逐字导航); 句内大写 (I am / 字母Z分组) 与拆词产物 (ZCode → "Z Code")
+/// 均不触发。不分侧, 字母读给哪侧就在哪侧处理; 前缀措辞按该侧语言由用户选择。
 enum LetterCaseStyle: String, Codable {
     case none       // 原样朗读
     case prefixZh   // 前缀 "大写": Z → "大写 Z" (主侧中文引擎)
@@ -31,7 +32,8 @@ struct SegmentRuleOptions: Codable, Equatable {
     var isolatedLetterToPrimary: Bool = false
     /// 数字一律交给主发音人; false = 左右都被英文夹住时归副发音人
     var digitsToPrimary: Bool = true
-    /// 孤立大写字母读时的辅助方式 (见 LetterCaseStyle; 措辞按字母朗读侧语言选)
+    /// 孤立大写字母读时的辅助方式 (见 LetterCaseStyle; 仅整句单字母时生效,
+    /// 措辞按字母朗读侧语言选)
     var letterCase: LetterCaseStyle = .none
 
     // 自定义解码: 手改 scheme.json 缺字段时回退默认值, 不整体报废
@@ -66,8 +68,12 @@ enum TextSegmenter {
     static func segment(_ raw: String, options: SegmentRuleOptions) -> [TextSegment] {
         let text = normalize(raw)
         guard !text.isEmpty else { return [] }
+        /* 大小写字母处理仅整句为单个大写字母时生效 (朗读单独字符场景);
+         * 句内大写 (I am / 字母Z分组) 与拆词产物 (ZCode → "Z Code") 不触发 */
+        let soloCapital = text.unicodeScalars.count == 1
+            && (0x41...0x5A).contains(text.unicodeScalars.first!.value)
         let runs = splitRuns(text)
-        let routed = route(runs, options: options)
+        let routed = route(runs, options: options, soloCapital: soloCapital)
         let attached = attach(routed)
         return merge(attached)
     }
@@ -187,7 +193,8 @@ enum TextSegmenter {
         let latinWords: Int
     }
 
-    static func route(_ runs: [Run], options: SegmentRuleOptions) -> [Routed] {
+    static func route(_ runs: [Run], options: SegmentRuleOptions,
+                      soloCapital: Bool) -> [Routed] {
         var items: [Item] = []
         var i = 0
         while i < runs.count {
@@ -245,12 +252,13 @@ enum TextSegmenter {
                 targets[k] = (prev == .secondary && next == .secondary) ? .secondary : .primary
             }
         }
-        /* 大小写字母处理: 孤立的单个大写字母 (ASCII A-Z, 含拼读拆出的) —
-         * 不分侧, 字母读给哪侧就在哪侧处理; 前缀措辞由用户按该侧语言选择 */
+        /* 大小写字母处理: 仅整句为单个大写字母 (soloCapital, 朗读单独字符场景)
+         * — 不分侧, 字母读给哪侧就在哪侧处理; 前缀措辞由用户按该侧语言选择 */
         return items.enumerated().map { i, item -> Routed in
             var text = item.text
             var cap = false
-            if item.cls == .latin, item.latinWords == 1, item.text.unicodeScalars.count == 1,
+            if soloCapital, item.cls == .latin, item.latinWords == 1,
+               item.text.unicodeScalars.count == 1,
                let ch = item.text.unicodeScalars.first, (0x41...0x5A).contains(ch.value) {
                 switch options.letterCase {
                 case .none: break
