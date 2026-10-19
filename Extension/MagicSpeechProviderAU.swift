@@ -157,11 +157,12 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
 
     // MARK: - Speech Synthesis Provider (核心三件套)
 
-    /// 声明语音: 每个引擎的每个发音人一条 + 双语方案槽位.
-    /// 调试: Engines/voicemode.txt (1=旧3条 2=仅永德 3=全部, 默认3) — 注册机制排查用.
+    /// 声明语音: 只注册方案槽位 (scheme.json 出现的键); 发音人不注册 —
+    /// 仅作方案素材与 App 内试听.
+    /// 调试: Engines/voicemode.txt (0=仅方案[默认] 1=旧3条 2=永德+方案 3=全部) — 注册机制排查用.
     public override var speechVoices: [AVSpeechSynthesisProviderVoice] {
         get {
-            var mode = 3
+            var mode = 0
             if let s = try? String(contentsOf: MagicPaths.enginesRoot.appendingPathComponent("voicemode.txt"),
                                     encoding: .utf8),
                let m = Int(s.trimmingCharacters(in: .whitespacesAndNewlines)) {
@@ -182,41 +183,42 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
                 }
                 return voices
             }
-            let n = mtts_engine_count()
-            for i in 0..<n {
-                guard let d = mtts_engine_at(Int32(i)) else { continue }
-                let desc = d.pointee
-                let engineKey = String(cString: desc.key)
-                let locale = String(cString: desc.locale)
-                if mode == 2 && engineKey != "yongde" { continue }
-                let vc = mtts_voice_count(engineKey)
-                for v in 0..<vc {
-                    guard let vd = mtts_voice_at(engineKey, v) else { continue }
-                    /* 语言按发音人 (英文包标 en-US 等); 适配器未填时回退引擎级 */
-                    let voiceLocale = String(cString: vd.pointee.locale)
-                    let lang = voiceLocale.isEmpty ? locale : voiceLocale
-                    voices.append(AVSpeechSynthesisProviderVoice(
-                        name: String(cString: vd.pointee.name),
-                        identifier: String(cString: vd.pointee.identifier),
-                        primaryLanguages: [lang],
-                        supportedLanguages: [lang]))
+            /* 发音人注册仅调试模式用 (2=仅永德 3=全部); 正常使用只有方案槽位. */
+            if mode >= 2 {
+                let n = mtts_engine_count()
+                for i in 0..<n {
+                    guard let d = mtts_engine_at(Int32(i)) else { continue }
+                    let desc = d.pointee
+                    let engineKey = String(cString: desc.key)
+                    let locale = String(cString: desc.locale)
+                    if mode == 2 && engineKey != "yongde" { continue }
+                    let vc = mtts_voice_count(engineKey)
+                    for v in 0..<vc {
+                        guard let vd = mtts_voice_at(engineKey, v) else { continue }
+                        /* 语言按发音人 (英文包标 en-US 等); 适配器未填时回退引擎级 */
+                        let voiceLocale = String(cString: vd.pointee.locale)
+                        let lang = voiceLocale.isEmpty ? locale : voiceLocale
+                        voices.append(AVSpeechSynthesisProviderVoice(
+                            name: String(cString: vd.pointee.name),
+                            identifier: String(cString: vd.pointee.identifier),
+                            primaryLanguages: [lang],
+                            supportedLanguages: [lang]))
+                    }
                 }
             }
             /* 方案槽位: 只注册已创建的 (scheme.json 出现的键); 名称带方案备注。
              * 增/删后 App 端调 updateSpeechVoices 让目录重查;
              * 槽位→实际发音人映射在请求时读 scheme.json, 改配置即时生效. */
-            if mode >= 2 {
-                let all = SchemeStore.loadAll()
-                for slot in SchemeStore.slots where all[slot] != nil {
-                    let label = all[slot]!.label
-                    let name = (SchemeStore.slotNames[slot] ?? slot)
-                        + (label.isEmpty ? "" : " — \(label)")
-                    voices.append(AVSpeechSynthesisProviderVoice(
-                        name: name,
-                        identifier: "com.magictts.scheme.\(slot)",
-                        primaryLanguages: ["zh-CN"],
-                        supportedLanguages: ["zh-CN", "en-US"]))
-                }
+            let all = SchemeStore.loadAll()
+            for slot in SchemeStore.slots where all[slot] != nil {
+                let label = all[slot]!.label
+                let name = (SchemeStore.slotNames[slot] ?? slot)
+                    + (label.isEmpty ? "" : " — \(label)")
+                voices.append(AVSpeechSynthesisProviderVoice(
+                    name: name,
+                    identifier: "com.magictts.scheme.\(slot)",
+                    primaryLanguages: ["zh-CN"],
+                    supportedLanguages: ["zh-CN", "en-US"]))
             }
             /* 静态兜底: 语音目录枚举在系统守护进程内 in-process 实例化 AU,
              * 那里读不了 appex 容器 → 扫描必为空。没有兜底时 getter 在枚举上下文
@@ -236,41 +238,18 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
         set {}   // ObjC 属性可仅覆写 getter; 系统不写此属性
     }
 
-    /// 静态发音人表 = 标准物料布局的固定集合 (永德 5 音色 + MS 每引擎默认 1 发音人
-    /// + 双语方案槽位). 永德键与 .vl 文件名一致; MS 用无键 id (解析得 voiceKey=nil
-    /// → 默认包), 故无论实际装了哪些包, 兜底 id 均可被合成端解析.
-    private static let staticVoices: [AVSpeechSynthesisProviderVoice] = {
-        func v(_ name: String, _ id: String) -> AVSpeechSynthesisProviderVoice {
+    /// 静态发音人表 = 方案槽位前两条. 语音目录枚举在系统守护进程内 in-process
+    /// 实例化 AU, 那里读不了 appex 容器 → 扫描必为空。没有兜底时 getter 在枚举
+    /// 上下文永远返回空表 = 槽位从不注册 (2026-10-17 回归根因)。
+    /// 发音人不注册, 兜底也仅含槽位; 合成端请求时读 scheme.json 映射实际发音人.
+    private static let staticVoices: [AVSpeechSynthesisProviderVoice] =
+        SchemeStore.slots.prefix(2).map {
             AVSpeechSynthesisProviderVoice(
-                name: name, identifier: id,
-                primaryLanguages: ["zh-CN"], supportedLanguages: ["zh-CN"])
-        }
-        var list = (0...4).map {
-            v("永德·语音\($0)", "com.magictts.yongde.ydvoice0\($0)")
-        }
-        list.append(v("自然语音·晓晓 HD", "com.magictts.naturalvoice"))
-        list.append(v("OneCore·晓晓 HD", "com.magictts.onecore"))
-        /* Kona (系统 Eloquence): zh/en 各 8 发音人 — 系统组件恒在,
-         * 守护进程上下文枚举不了系统发音人, 也用静态表兜底。 */
-        let konaNames = ["Eddy", "Flo", "Grandma", "Grandpa", "Reed", "Rocko", "Sandy", "Shelley"]
-        let konaZh = ["Eddy", "Flo", "奶奶", "爷爷", "Reed", "Rocko", "Sandy", "Shelley"]
-        for (i, n) in konaNames.enumerated() {
-            list.append(v("\(konaZh[i])·中文 (Kona)", "com.magictts.kona.\(n.lowercased())-zh"))
-        }
-        for n in konaNames {
-            list.append(AVSpeechSynthesisProviderVoice(
-                name: "\(n)·English (Kona)", identifier: "com.magictts.kona.\(n.lowercased())-en",
-                primaryLanguages: ["en-US"], supportedLanguages: ["en-US"]))
-        }
-        for slot in SchemeStore.slots.prefix(2) {
-            list.append(AVSpeechSynthesisProviderVoice(
-                name: SchemeStore.slotNames[slot] ?? slot,
-                identifier: "com.magictts.scheme.\(slot)",
+                name: SchemeStore.slotNames[$0] ?? $0,
+                identifier: "com.magictts.scheme.\($0)",
                 primaryLanguages: ["zh-CN"],
-                supportedLanguages: ["zh-CN", "en-US"]))
+                supportedLanguages: ["zh-CN", "en-US"])
         }
-        return list
-    }()
 
     /// 合成请求 — 系统送来 SSML + voice. 方案语音切段分发, 普通语音单段直通.
     public override func synthesizeSpeechRequest(_ request: AVSpeechSynthesisProviderRequest) {

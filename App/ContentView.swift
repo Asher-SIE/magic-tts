@@ -13,9 +13,6 @@ struct VoiceListRow: View {
                     .textSelection(.enabled)
             }
             Spacer()
-            if voice.systemVoiceId == nil {
-                Text("未注册").font(.caption).foregroundStyle(.orange)
-            }
             Button("播放") { EngineRegistry.preview(voice) }
         }
         .padding(.vertical, 1)
@@ -101,11 +98,17 @@ struct SchemeEditor: View {
         _scheme = State(initialValue: draft.scheme)
     }
 
+    /// 第二语音选择器里"无"选项的 tag (= 单语音方案, 全部文本归主侧)。
+    private static let noneSel = "none"
+
     /// 面板当前状态 (选择器已套用) — 试听与保存都用它
     private var previewing: Scheme {
         var s = scheme
         applyPicker(primarySel, into: &s.primary)
-        applyPicker(secondarySel, into: &s.secondary)
+        s.useSecondary = secondarySel != Self.noneSel
+        if s.useSecondary {
+            applyPicker(secondarySel, into: &s.secondary)
+        }
         return s
     }
 
@@ -133,16 +136,16 @@ struct SchemeEditor: View {
                 }
 
                 Section("第二语音") {
-                    Toggle("启用第二语音", isOn: $scheme.useSecondary)
-                    if scheme.useSecondary {
-                        Picker("发音人", selection: $secondarySel) {
-                            ForEach(voices) { v in Text(v.label).tag(v.id) }
-                        }
+                    Picker("发音人", selection: $secondarySel) {
+                        Text("无 (仅主引擎朗读)").tag(Self.noneSel)
+                        ForEach(voices) { v in Text(v.label).tag(v.id) }
+                    }
+                    if previewing.useSecondary {
                         sideParams($scheme.secondary)
                     }
                 }
 
-                if scheme.useSecondary {
+                if previewing.useSecondary {
                     Section("分发规则") {
                         Toggle("孤立字母归中文侧 (如 “Z 分组”)", isOn: $scheme.rules.isolatedLetterToPrimary)
                         Toggle("数字归中文侧", isOn: $scheme.rules.digitsToPrimary)
@@ -170,7 +173,7 @@ struct SchemeEditor: View {
         .frame(width: 480, height: 640)
         .onAppear {
             primarySel = selId(scheme.primary)
-            secondarySel = selId(scheme.secondary)
+            secondarySel = scheme.useSecondary ? selId(scheme.secondary) : Self.noneSel
         }
     }
 

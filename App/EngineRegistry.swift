@@ -2,13 +2,13 @@ import AVFoundation
 import Foundation
 
 /// 发音人状态模型 — 引擎 × 发音人 (C 桥 mtts_voice_*).
+/// 发音人不注册为系统语音 (系统里只有方案槽位), 仅作方案素材与 App 内试听.
 struct VoiceRow: Identifiable {
     let engineKey: String
     let engineName: String
     let key: String                  // 发音人选择键 (ydvoice01 / 包目录名)
     let name: String                 // 显示名 "永德·语音1"
-    let identifier: String           // 我们声明的语音 id: com.magictts.<engine>.<key>
-    let systemVoiceId: String?       // 系统注册后的完整 id (带 appex bundle 前缀); 未注册为 nil
+    let identifier: String           // 引擎内部语音 id: com.magictts.<engine>.<key>
     var id: String { identifier }
 }
 
@@ -34,11 +34,6 @@ enum EngineRegistry {
 
         _ = mtts_global_scan(root.path)
 
-        /* 系统注册的语音 identifier 会被加上 appex bundle 前缀
-         * (com.magictts.voices.synth.<我们的id>), 试听必须用完整 id,
-         * 否则 AVSpeechSynthesisVoice(identifier:) 返回 nil → 静默回退默认语音. */
-        let systemVoices = AVSpeechSynthesisVoice.speechVoices()
-
         var out: [EngineStatus] = []
         let n = mtts_engine_count()
         for i in 0..<n {
@@ -52,25 +47,12 @@ enum EngineRegistry {
             let vc = mtts_voice_count(key)
             for v in 0..<vc {
                 guard let vd = mtts_voice_at(key, v) else { continue }
-                let ourId = String(cString: vd.pointee.identifier)
-                /* 系统目录里可能是兜底注册的引擎级 id (枚举上下文读不到包目录),
-                 * 逐级匹配: 完整 id → 引擎级 id. */
-                let engineLevelId = "com.magictts." + key
-                let systemId = systemVoices
-                    .first { $0.identifier == ourId
-                          || $0.identifier.hasSuffix("." + ourId)
-                          || $0.identifier.hasSuffix("." + engineLevelId) }?
-                    .identifier
                 rows.append(VoiceRow(
                     engineKey: key,
                     engineName: String(cString: desc.voice_name),
                     key: String(cString: vd.pointee.key),
                     name: String(cString: vd.pointee.name),
-                    identifier: ourId,
-                    systemVoiceId: systemId))
-            }
-            if rows.contains(where: { $0.systemVoiceId == nil }) {
-                NSLog("[MagicTTS] %@ 有发音人未注册到系统 (点「刷新语音列表」)", key)
+                    identifier: String(cString: vd.pointee.identifier)))
             }
             out.append(EngineStatus(
                 key: key,
