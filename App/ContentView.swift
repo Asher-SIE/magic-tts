@@ -232,6 +232,8 @@ struct ContentView: View {
     @State private var showRules = false
     @State private var editing: SchemeEditDraft?
     @State private var confirmDelete = false
+    @State private var importing = false
+    @State private var importError: String?
 
     /// 全引擎发音人拍平 (方案编辑用), 每引擎的"自动"项排在该引擎发音人之前
     private var voiceOptions: [VoiceOption] {
@@ -263,6 +265,8 @@ struct ContentView: View {
             HStack {
                 Button("朗读替换规则…") { showRules = true }
                 Button("刷新语音列表") { reload() }
+                Button(importing ? "导入中…" : "导入引擎数据…") { pickEnginesArchive() }
+                    .disabled(importing)
                 Spacer()
             }
 
@@ -294,7 +298,45 @@ struct ContentView: View {
             Button("删除", role: .destructive) { deleteSelected() }
             Button("取消", role: .cancel) {}
         }
+        .alert("导入引擎数据失败",
+               isPresented: Binding(get: { importError != nil },
+                                    set: { if !$0 { importError = nil } })) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(importError ?? "")
+        }
         .onAppear { reload() }
+        .onReceive(NotificationCenter.default.publisher(for: EngineImporter.importedNotification)) { _ in
+            reload()
+        }
+    }
+
+    /// 选 zip 包或已解压目录导入引擎物料 (大包拷贝需数秒~分钟, 后台执行)
+    private func pickEnginesArchive() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "选择分发包里的 Engines 目录或整包 zip"
+        if panel.runModal() == .OK, let url = panel.url {
+            importEngines(from: url)
+        }
+    }
+
+    private func importEngines(from url: URL) {
+        importing = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try EngineImporter.importEngines(from: url) }
+            DispatchQueue.main.async {
+                importing = false
+                switch result {
+                case .success:
+                    reload()
+                case .failure(let err):
+                    importError = err.localizedDescription
+                }
+            }
+        }
     }
 
     /// 上方方案区: 左列表 (单击选中, 双击编辑) + 右侧管理按钮

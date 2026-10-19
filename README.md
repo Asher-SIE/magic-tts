@@ -131,15 +131,20 @@ open -a ~/Applications/MagicTTS.app       # 启动即刷新发音人注册
 
 ## 引擎数据
 
-引擎物料（只读）随包分发：`MagicTTS.app/Contents/PlugIns/MagicTTSSynth.appex/
-Contents/Resources/Engines/<key>/`，构建时从 `resources/engines/` 整目录拷入
-**appex 包体**（合成宿主进程的沙盒只放行 appex 自身 bundle 树，物料放宿主 App
-的 Resources 下读不到 → say 空音频，2026-10-19 实测）——分发一个 .app 即自包含，
-无装后填充。可写状态（`scheme.json` / `rules.json` / `.debug`）仍在 appex 自有
-沙盒容器 `~/Library/Containers/com.magictts.voices.synth/Data/Engines/`（曾用
-App Group 容器——沙盒扩展读组容器会被 TCC 视为"访问其他 App 的数据"，每句合成
-都弹权限框且授权记不住；自有容器根治。宿主 App 不沙盒化，直接读同一绝对路径，
-首启最多弹一次框且会被记住）。
+引擎物料（1.8G）**外置**：appex 容器 `~/Library/Containers/com.magictts.voices.synth/
+Data/Library/Application Support/Engines/<key>/`（即 appex 沙盒内标准 Application
+Support，与状态文件同树，合成宿主读取实测可靠；曾内嵌 appex 包体——LaunchServices
+每次启动都校验 1.8G 签名，启动要数秒，已废弃）。
+
+**分发** = 单 zip（`scripts/package-zip.sh` → `build/MagicTTS-dist.zip`，内含
+MagicTTS.app + Engines/）。收件人解压后直接运行 app，首启检测到旁边 Engines/
+即后台自动导入；也可在 App 内「导入引擎数据」手动选 zip 或 Engines 目录
+（替换式导入，逐引擎覆盖）。
+
+可写状态（`scheme.json` / `rules.json` / `.debug`）在容器
+`…/Data/Engines/`（曾用 App Group 容器——沙盒扩展读组容器会被 TCC 视为
+"访问其他 App 的数据"，每句合成都弹权限框且授权记不住；自有容器根治。
+宿主 App 不沙盒化，直接读同一绝对路径，首启最多弹一次框且会被记住）。
 
 ```bash
 ./scripts/fetch-ms-sdk.sh                 # 从零: 下载微软 Speech SDK 运行库
@@ -159,17 +164,17 @@ App Group 容器——沙盒扩展读组容器会被 TCC 视为"访问其他 App
 
 ```
 resources/
-├── engines/                              # 引擎物料备份/开发源 (构建时整目录拷入 appex 包体)
+├── engines/                              # 引擎物料备份/开发源 (package-zip.sh 打入分发 zip)
 │   ├── yongde/                           #   53M: voices/*.vl + 拼音词典 (词典入 git)
 │   ├── naturalvoice/                     #  444M: dylib + model/ (二进制未入 git)
 │   └── onecore/                          #  1.3G: dylib + model/ (二进制未入 git)
 └── ms-voices/                            # NeuralVoices 微软语音包离线备份 (1.4G, 14 包 / 7 个 license 型, 未入 git)
 ```
 
-`resources/engines/` 为引擎物料的唯一权威源；增删发音人包后重跑
-`build-clt.sh` 重装即生效。MS 语音包原始下载备份在 `resources/ms-voices/
-NeuralVoices/`（含 7 个 HD `.license` 包；`fetch-voice-models.sh` 依赖广荣
-服务器账号，未必随时可下）。
+`resources/engines/` 为引擎物料的唯一权威源，App 导入的物料即此副本；增删发音人
+包后重跑 `package-zip.sh` 重新分发即可。MS 语音包原始下载备份在
+`resources/ms-voices/NeuralVoices/`（含 7 个 HD `.license` 包；
+`fetch-voice-models.sh` 依赖广荣服务器账号，未必随时可下）。
 2026-10-18 工作区收敛至本仓库：反编译树/其他平台包/APK/引擎二进制
 （tts.apk、grtts.nvda-addon、VVTTS 素材、libyongde_tts.so 等）已删除，
 仅保留运行所需语音数据；逆向结论以 docs/ 与 git 历史为准。
@@ -184,7 +189,7 @@ swift scripts/check_system_voices.swift   # 语音目录 + AU 组件 + 探针 �
 
 ```bash
 clang -std=c11 -IBridge/include -o /tmp/mtts_cli scripts/test_cli.c Bridge/*.c -ldl -lpthread
-MT_ENGINES="$HOME/Applications/MagicTTS.app/Contents/PlugIns/MagicTTSSynth.appex/Contents/Resources/Engines" \
+MT_ENGINES="$HOME/Library/Containers/com.magictts.voices.synth/Data/Library/Application Support/Engines" \
   /tmp/mtts_cli yongde "中东西通红龙用"
 say -v '永德·语音0' "中东西通红龙用"
 say -v '语音方案·一' "中文与English混读，NVDA version 3.14，字母Z分组。"   # 默认方案 = Eddy 中文+英文 (Kona)
@@ -202,6 +207,8 @@ say -v '语音方案·一' "中文与English混读，NVDA version 3.14，字母Z
    updateSpeechVoices()` 对"未变化的 app"不触发重枚举。可靠触发法 = 重装 app
    (`rm -rf` + `cp -R` + `open`)，或删除/安装任一带语音扩展的 app，或重启。
    （旧坑清单里的 `killall speechvoiced` 在 macOS 26 上该进程根本不存在。）
+3. **导入引擎物料后若 say 仍空音频**：合成宿主守护进程可能缓存了「缺物料」
+   扫描结果，`pkill -f MagicTTSSynth` 后重试，仍不行则注销/重启。
 3. **`speechVoices` getter 必须零文件依赖可用**：系统枚举发音人时在守护进程
    上下文里实例化 AU，那里读不了 appex 容器——扫描拿不到引擎数据。getter
    末尾的静态兜底表就是为这个准备的（2026-10-17 回归根因：无兜底时枚举侧
