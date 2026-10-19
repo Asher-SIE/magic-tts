@@ -8,13 +8,20 @@ import Foundation
 ///   原版 audioAvailable     → internalRenderBlock 输出 Float32
 ///   原版 onStop             → cancelSpeechRequest
 ///
-/// 流式: 请求线程 start (毫秒级返回), 渲染块按帧从 mtts_stream 拉取重采样.
-/// MS 引擎首块音频 ~0.8s 到达 (模型首次推理), 之后 ~1.6× 实时供给.
+/// 流式: 请求线程毫秒级返回; **馈送线程** (feeder) 独占全部引擎流的
+/// 启动/阻塞读/释放, 逐段拉取并线性换算到输出采样率后推入共享 srcBuf;
+/// 渲染块只从 srcBuf 顺序消费, 绝不触碰引擎 (无阻塞 → 无输出断流).
+/// MS 引擎首块音频 ~0.8s 到达 (模型首次推理), 之后 ~1.6× 实时供给,
+/// feeder 供给快于播放 → 领先量持续累积, 段切换点数据恒就绪.
 ///
-/// 段队列 (双语方案): 一次请求切分为多段, 每段一个引擎流, 逐段拉尽切换;
-/// 相邻段必不同侧 (TextSegmenter 合并同侧相邻段), 故 MS 同一 voice 会话
-/// 永远不会出现并发流 (ms 适配器要求每 voice 串行, launch 前 stop+复位拍).
-/// 启动线程领先渲染位置 1 段流水线预热, 消除段间切换静默.
+/// 段队列 (双语方案): 一次请求切分为多段, 每段一个引擎流, feeder 逐段
+/// 拉尽切换. 相邻段必不同侧 (TextSegmenter 合并同侧相邻段); 读当前段时
+/// 预启动下一段 (同 (engine,voice) 不预启动 — MS 会话每 voice 单 wav 文件
+/// + 单 active 流, 必须串行, 故音高变体的孤立字母段自然顺延).
+/// 拼接缝断层治理 (2026-10-19): 引擎段尾自带 ~130ms+ 静默 (dump 实测
+/// kona 135ms/段首 0ms), 双语逐段拼接时每个切换点白停一拍 → feeder 在
+/// 段读尽时裁掉 srcBuf 尾部未消费的静默 (trimSeamTail, 按段尾标点分档
+/// 保留 50/100/160ms). feeder 领先播放进度, 裁剪时静默尚未播出, 故可整段裁去.
 public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
 
     // MARK: - 调试探针 (统一日志对未签名构建不可用 → 写文件)
@@ -31,7 +38,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
         }
     }
 
-    /// 延迟探针: 请求到达 → 引擎首批样本可渲染 的全程耗时 (逐句, 上限 400 行轮转).
+    /// 延迟探针: 请求到达 → 引擎首批样本入缓冲 的全程耗时 (逐句, 上限 400 行轮转).
     /// 读法: 首句 ~700ms+ = 冷推理 (每语音每进程一次), 之后 ~130-180ms = MS 热路径.
     private static func probeLatency(_ ms: Double, engine: String, rate: Int32, text: String) {
         probeWrite("first-sample=\(Int(ms))ms engine=\(engine) rate=\(rate) text=\(text)")
@@ -85,7 +92,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
         }
     }
 
-    // MARK: - 段队列状态 (stateLock 保护; 渲染线程读, 请求/启动线程写)
+    // MARK: - 段队列与音频缓冲 (stateLock 保护; 请求线程写, feeder 读写, 渲染线程读)
 
     /// 一段 = 一个引擎流. gain 为渲染级逐样本增益 (方案音量).
     private struct SegPlan {
@@ -99,29 +106,23 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
 
     private let stateLock = NSLock()
     private var plans: [SegPlan] = []
-    private var streams: [OpaquePointer?] = []   // 已启动的流 (nil = 未启动或失败)
+    private var streams: [OpaquePointer?] = []   // 引擎流 (feeder 启动/读尽/释放)
     private var started: [Bool] = []             // 已尝试启动
     private var rates: [Int32] = []              // 各段引擎采样率
-    private var nextToStart = 0                  // 启动线程游标
-    private var currentIdx = 0                   // 渲染游标
-    private var retired: [OpaquePointer] = []    // 已取消/读尽待释放 (渲染线程释放)
     private var gen: UInt64 = 0                  // 请求代际 (渲染侧据此复位缓冲)
-    private var pending = false                  // 请求已接受, 第 0 段未启动完
     private var cancelled = true
+    private var prefetchDone = false             // feeder 已读尽全部段
     private var dumpAudio = false                // .debug/dump 存在时写调试 WAV
     private var reqStart: DispatchTime? = nil    // 延迟探针: 请求到达时刻 (状态锁保护)
-    private var probeSegIdx = -1                // 延迟探针: 已记录到第几段 (渲染线程)
 
-    private let starterQueue = DispatchQueue(label: "magictts.segstart")
+    /// 共享音频缓冲: feeder 产 (已换算到输出采样率), 渲染线程消费.
+    private var srcBuf: [Float] = []
+    private var srcPos: Int = 0                   // 渲染消费位置 (srcBuf 索引空间)
+    private var dbg: [Float] = []                 // 调试转储 (与 srcBuf 尾部对齐)
 
     // 渲染线程私有 (仅 render block 触碰)
-    private var srcBuf: [Float] = []        // 引擎采样率 Float32 累积缓冲
-    private var srcPos: Double = 0          // 消费位置 (srcBuf 索引空间, 小数步进)
     private var curGen: UInt64 = 0
-    private var curRate: Double = 24000
     private var dumpActive = false
-    private var dbg: [Float] = []
-    private var dbgRate: Int = 24000
 
     private let outputBus: AUAudioUnitBus
     private var storedRenderBlock: AUInternalRenderBlock!
@@ -149,7 +150,6 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
         for s in streams {
             if let s { mtts_stream_cancel(s); mtts_stream_free(s) }
         }
-        for s in retired { mtts_stream_free(s) }
     }
 
     // MARK: - Speech Synthesis Provider (核心三件套)
@@ -310,16 +310,19 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
                                 rate: Int32(parsed.rate), pitch: Int32(parsed.pitch), gain: 1.0)]
         }
 
-        // 旧队列退休 (cancel 立即; 释放留给渲染线程, 避免与在途 read 竞争)
+        // 旧队列退休: 仅 cancel 解除阻塞读 (在途流的释放由其 feeder 收尾);
+        // 随后整组换新, 音频缓冲复位
         stateLock.lock()
         for i in streams.indices {
-            if let s = streams[i] { mtts_stream_cancel(s); retired.append(s); streams[i] = nil }
+            if let s = streams[i] { mtts_stream_cancel(s) }
         }
         plans = []; streams = []; started = []; rates = []
-        nextToStart = 0; currentIdx = 0
+        srcBuf.removeAll(keepingCapacity: true)
+        srcPos = 0
+        dbg.removeAll(keepingCapacity: true)
         gen &+= 1
         cancelled = newPlans.isEmpty     // 空文本 → 渲染立即 Complete
-        pending = !newPlans.isEmpty
+        prefetchDone = newPlans.isEmpty
         reqStart = newPlans.isEmpty ? nil : .now()   // 延迟探针起点
         dumpAudio = FileManager.default.fileExists(
             atPath: MagicPaths.enginesRoot.appendingPathComponent(".debug/dump").path)
@@ -333,14 +336,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
         stateLock.unlock()
 
         guard !newPlans.isEmpty else { return }
-
-        // 同步启动第 0 段 (pending 就此解除; MS 会话含 stop+复位拍 ~150ms)
-        let idx0 = popLaunchIndex()
-        if idx0 >= 0 {
-            launchSegment(idx0, requestGen: g)
-        }
-        stateLock.lock(); pending = false; stateLock.unlock()
-        scheduleStarter()   // 后续段流水线启动 (领先渲染位置 1 段)
+        spawnFeeder(g)
     }
 
     /// identifier → (engineKey, voiceKey?).
@@ -358,99 +354,225 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
         return (String(engine), voice)
     }
 
-    /// 停止: 取消全部段.
+    /// 停止: 取消全部段 (feeder 见状释放自身流后退出).
     public override func cancelSpeechRequest() {
         NSLog("[MagicTTS] cancel")
         Self.probeMarkStatic("cancel-request")
         stateLock.lock()
         cancelled = true
-        pending = false
         for i in streams.indices {
-            if let s = streams[i] { mtts_stream_cancel(s); retired.append(s); streams[i] = nil }
+            if let s = streams[i] { mtts_stream_cancel(s) }
         }
         stateLock.unlock()
     }
 
-    // MARK: - 段启动 (请求线程同步起第 0 段; 后续段由 starter 流水线起)
+    // MARK: - 馈送线程 (独占引擎流的启动/读取/释放)
 
-    /// 取下一个待启动段 (须 ≤ 渲染位置+1, 保持流水线深度 1). 无 → -1.
-    /// 同 (engine,voice) 串行约束 (MS 会话 launch 前 stop+复位拍, 不容并发流):
-    /// 音高变体的孤立字母段会与邻段同侧 → 待启段与任一在途流同 voice 时暂缓,
-    /// 由渲染线程读尽退役后再启 (scheduleStarter 会持续重试).
-    private func popLaunchIndex() -> Int {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        if cancelled { return -1 }
-        guard nextToStart < plans.count, nextToStart <= currentIdx + 1 else { return -1 }
-        if nextToStart > 0 {
-            let np = plans[nextToStart]
-            for i in 0..<streams.count where i != nextToStart && streams[i] != nil {
-                if plans[i].engine == np.engine && plans[i].voice == np.voice { return -1 }
-            }
+    /// 拼接缝目标停顿 (ms) — 段尾静默裁剪的保留量, 按段尾标点分档, 听感可调.
+    private static let seamKeepSentence: Double = 160   // 。！？! ? …
+    private static let seamKeepClause: Double = 100     // ，、；：, ; :
+    private static let seamKeepDefault: Double = 50     // 其余 (词内/无标点切换)
+    private static let seamSilenceThreshold: Float = 0.01   // |x| < ~-40dB 视为静默
+
+    /// 拼接缝收口 (feeder, 段读尽时): 裁掉 srcBuf 尾部未消费的静默, 只留目标停顿.
+    /// 引擎段尾自带 ~130ms+ 静默 (2026-10-19 dump 实测 kona 135ms/段首 0ms),
+    /// 双语逐段拼接时每个切换点白停一拍 = 断层感主体. feeder 领先播放进度,
+    /// 静默尚未播出即可裁去; 下一段段首静默不动 (永德的句读停顿在段首,
+    /// 裁它会吃掉标点停顿). dbg 转储同步裁剪以反映实际播放时间线.
+    /// 调用方持 stateLock.
+    private func trimSeamTailLocked(_ segEnd: Character?) {
+        let keepMs: Double
+        if let c = segEnd, "。！？!?…".contains(c) {
+            keepMs = Self.seamKeepSentence
+        } else if let c = segEnd, "，、；：,;:".contains(c) {
+            keepMs = Self.seamKeepClause
+        } else {
+            keepMs = Self.seamKeepDefault
         }
-        let idx = nextToStart
-        nextToStart += 1
-        return idx
+        let keep = Int(keepMs / 1000.0 * self.outputBus.format.sampleRate)
+        var sil = 0
+        while sil < self.srcBuf.count
+            && abs(self.srcBuf[self.srcBuf.count - 1 - sil]) < Self.seamSilenceThreshold {
+            sil += 1
+        }
+        let trim = min(sil, self.srcBuf.count - self.srcPos) - keep
+        if trim > 0 {
+            self.srcBuf.removeLast(trim)
+            if self.dumpAudio { self.dbg.removeLast(min(trim, self.dbg.count)) }
+        }
     }
 
-    private func launchSegment(_ idx: Int, requestGen: UInt64) {
-        let plan: SegPlan = {
-            stateLock.lock()
-            defer { stateLock.unlock() }
-            return plans[idx]
-        }()
+    /// 启动一段流 (feeder 线程, 阻塞至 mtts_stream_start 返回).
+    /// 返回流指针; 代际已顶替或启动失败 → nil (失败仅记日志, 调用方跳段).
+    private func feederLaunch(_ idx: Int, plan: SegPlan, requestGen: UInt64) -> OpaquePointer? {
         let probeT0: DispatchTime? = {
             stateLock.lock()
             defer { stateLock.unlock() }
             return reqStart
         }()
         var sr: Int32 = 24000
+        let t0 = DispatchTime.now()
         let st = mtts_stream_start(plan.engine, plan.voice, plan.text,
                                    plan.rate, plan.pitch, &sr)
-        if idx == 0, let t0 = probeT0 {
-            let ms = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000
+        if idx == 0, let t0p = probeT0 {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - t0p.uptimeNanoseconds) / 1_000_000
             Self.probePhase("launch", ms: ms, engine: plan.engine)
-        }
-        if st == nil {
-            NSLog("[MagicTTS] 第 \(idx) 段启动失败 (engine=\(plan.engine) voice=\(plan.voice ?? "-"))")
+        } else {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000
+            if ms > 100 { NSLog("[MagicTTS] 第 \(idx) 段启动慢 \(Int(ms))ms") }
         }
         stateLock.lock()
-        if gen == requestGen {
+        defer { stateLock.unlock() }
+        guard gen == requestGen else {
+            // 启动期间请求被顶替: 该流不属于当前代际, 自行释放
+            if let st { mtts_stream_cancel(st); mtts_stream_free(st) }
+            return nil
+        }
+        if st == nil {
+            started[idx] = true
+            NSLog("[MagicTTS] 第 \(idx) 段启动失败 (engine=\(plan.engine) voice=\(plan.voice ?? "-"))")
+        } else {
             streams[idx] = st
             rates[idx] = sr
             started[idx] = true
-        } else if let st {
-            // 启动期间请求被顶替: 该流不属于当前代际, 立即退役
-            mtts_stream_cancel(st)
-            retired.append(st)
         }
-        stateLock.unlock()
+        return st
     }
 
-    /// 启动线程: 保持 nextToStart ≤ currentIdx+1; 空闲/取消即退出,
-    /// 渲染推进或新请求会再次调度 (重复调度无碍 — 取段在锁内原子).
-    private func scheduleStarter() {
-        starterQueue.async { [weak self] in
-            guard let self else { return }
+    /// 馈送线程主体: 按段序 启动 → 读尽 → 裁缝 → 下一段.
+    /// 读当前段前预启动下一段 (同 (engine,voice) 不预启动 — MS 每 voice 单会话
+    /// 必须串行, 音高变体的孤立字母段自然顺延到前任读尽后).
+    /// 强持有 self: 流的释放只发生在本线程 (与 cancel 的跨线程 cancel 错开),
+    /// 退出前清完 myStreams, deinit 才可能到来.
+    private func spawnFeeder(_ requestGen: UInt64) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let outRate = self.outputBus.format.sampleRate
+            var myStreams: [OpaquePointer] = []   // 本 feeder 启动的流 (退出前统一释放)
+            var scratch = [Int16](repeating: 0, count: 4096)
+            var idx = 0
+            // 段内线性重采样状态 (引擎采样率 → 输出采样率)
+            var segPos = 0.0        // 段内已消费位置 (引擎样本空间, 累计)
+            var segBase = 0         // 当前 chunk 在段内的起始样本序
+            var prevTail: Float = 0 // 上一 chunk 末样本 (跨 chunk 插值用)
+            var probeIdx = -1       // 延迟探针: 已记录到第几段
+
+            // 释放本 feeder 启动过且尚未读尽释放的流, 并清掉 streams[] 里的
+            // 悬垂指针 (代际未变时; 已换新则数组整体替换过, 无需清)
+            func cleanup() {
+                for s in myStreams { mtts_stream_cancel(s); mtts_stream_free(s) }
+                self.stateLock.lock()
+                if self.gen == requestGen {
+                    for i in self.streams.indices {
+                        if let s = self.streams[i], myStreams.contains(s) { self.streams[i] = nil }
+                    }
+                }
+                self.stateLock.unlock()
+            }
+
             while true {
+                // 代际/取消 快照 + 当前段参数
                 self.stateLock.lock()
                 let g = self.gen
-                let cancelled = self.cancelled
-                let idle = self.nextToStart >= self.plans.count
-                    || self.nextToStart > self.currentIdx + 1
+                let isCancelled = self.cancelled
+                let planCount = self.plans.count
+                var plan = SegPlan(engine: "yongde", voice: nil, text: "",
+                                   rate: 100, pitch: 50, gain: 1)
+                var cur: OpaquePointer?
+                var attempted = true
+                if idx < planCount {
+                    plan = self.plans[idx]
+                    cur = self.streams[idx]
+                    attempted = self.started[idx]
+                }
+                let probeT0 = self.reqStart
                 self.stateLock.unlock()
-                if cancelled || idle { return }
-                let idx = self.popLaunchIndex()
-                if idx < 0 {
-                    usleep(10_000)   // 无段可启 (被并发启动线程抢走) → 稍后再看
+                if isCancelled || g != requestGen { cleanup(); return }
+                guard idx < planCount else {
+                    self.stateLock.lock()
+                    if self.gen == requestGen { self.prefetchDone = true }
+                    self.stateLock.unlock()
+                    return
+                }
+
+                // 确保当前段已启动
+                if cur == nil {
+                    if attempted {   // 启动失败 → 跳段
+                        idx += 1; segPos = 0; segBase = 0; prevTail = 0
+                        continue
+                    }
+                    guard let st = self.feederLaunch(idx, plan: plan, requestGen: requestGen) else {
+                        continue   // 失败已记; 顶替已清理
+                    }
+                    myStreams.append(st)
                     continue
                 }
-                self.launchSegment(idx, requestGen: g)
+
+                // 预启动下一段 (差异 voice 才行 — 同 voice 须等本段读尽)
+                if idx + 1 < planCount {
+                    self.stateLock.lock()
+                    let nextStarted = idx + 1 < self.started.count && self.started[idx + 1]
+                    let nextPlan = self.plans[idx + 1]
+                    let nextCur = idx + 1 < self.streams.count ? self.streams[idx + 1] : nil
+                    self.stateLock.unlock()
+                    if !nextStarted && nextCur == nil
+                        && !(nextPlan.engine == plan.engine && nextPlan.voice == plan.voice),
+                       let st = self.feederLaunch(idx + 1, plan: nextPlan, requestGen: requestGen) {
+                        myStreams.append(st)
+                    }
+                }
+
+                // 阻塞读一块 (MS 按数据到达节律; 内存引擎立即返回)
+                var done: Int32 = 0
+                let got = mtts_stream_read(cur!, &scratch, Int32(scratch.count), &done)
+                if got > 0 {
+                    let n = Int(got)
+                    self.stateLock.lock()
+                    if self.gen == requestGen {
+                        if idx > probeIdx, let t0 = probeT0 {
+                            probeIdx = idx
+                            let ms = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000
+                            Self.probeLatency(ms, engine: plan.engine, rate: plan.rate,
+                                              text: String(plan.text.prefix(16)))
+                        }
+                        // 线性换算到输出采样率后追加 (含增益)
+                        let bufBefore = self.srcBuf.count
+                        let step = Double(self.rates.indices.contains(idx) ? self.rates[idx] : 24000) / outRate
+                        while segPos + 1 < Double(segBase + n) {
+                            let i0 = Int(segPos) - segBase
+                            let s0: Float = i0 < 0 ? prevTail : Float(scratch[i0]) / 32768.0 * plan.gain
+                            let s1: Float = Float(scratch[i0 + 1]) / 32768.0 * plan.gain
+                            let frac = Float(segPos - Double(Int(segPos)))
+                            self.srcBuf.append(s0 * (1 - frac) + s1 * frac)
+                            segPos += step
+                        }
+                        if self.dumpAudio {
+                            self.dbg.append(contentsOf: self.srcBuf.suffix(self.srcBuf.count - bufBefore))
+                        }
+                    }
+                    self.stateLock.unlock()
+                    segBase += n
+                    prevTail = Float(scratch[n - 1]) / 32768.0 * plan.gain
+                }
+
+                if done != 0 || got == 0 {
+                    // 段读尽: 摘除 (代际未变时) + 裁缝 + 释放 + 推进
+                    self.stateLock.lock()
+                    let mine = self.gen == requestGen && self.streams.indices.contains(idx)
+                        && self.streams[idx] == cur
+                    if mine {
+                        self.streams[idx] = nil
+                        self.trimSeamTailLocked(plan.text.last)
+                    }
+                    self.stateLock.unlock()
+                    mtts_stream_free(cur!)
+                    myStreams.removeAll { $0 == cur }
+                    idx += 1; segPos = 0; segBase = 0; prevTail = 0
+                }
             }
         }
     }
 
-    // MARK: - 渲染 (流式: 段队列逐段拉取 + 线性重采样, 末段尽置 Complete)
+    // MARK: - 渲染 (只消费 srcBuf; 饥饿有界等待, 末段尽置 Complete)
 
     private func makeRenderBlock() -> AUInternalRenderBlock {
         { [weak self] actionFlags, _, frameCount, _, audioBufferList, _, _ in
@@ -462,34 +584,12 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
             }
             abl[0].mDataByteSize = UInt32(Int(frameCount) * MemoryLayout<Float>.size)
 
-            // 退休流释放 (仅渲染线程操作, 与 read 无竞争)
             self.stateLock.lock()
-            let retiredNow = self.retired
-            self.retired = []
             let g = self.gen
             var isCancelled = self.cancelled
-            var isPending = self.pending
-            var firstStarted = self.started.first ?? true
+            var allDone = self.prefetchDone
             let dump = self.dumpAudio
-            let probeT0 = self.reqStart                       // 延迟探针快照
-            let probeEngine = self.plans.first?.engine ?? "-"
-            let probeRate = self.plans.first?.rate ?? 0
-            let probeText = self.plans.first?.text ?? ""
             self.stateLock.unlock()
-            for s in retiredNow { mtts_stream_free(s) }
-
-            /* 请求在途而第 0 段未启动 → 有界等待 (4ms 粒度, 延迟治理: 原 20ms
-             * 轮询给稳态首样本白叠 0-20ms; stream_start 毫秒级, MS 会话含复位拍) */
-            var waitedMs = 0
-            while !isCancelled && isPending && !firstStarted && waitedMs < 15_000 {
-                usleep(4000)
-                waitedMs += 4
-                self.stateLock.lock()
-                isCancelled = self.cancelled
-                isPending = self.pending
-                firstStarted = self.started.first ?? true
-                self.stateLock.unlock()
-            }
 
             guard !isCancelled else {
                 for i in 0..<Int(frameCount) { out[i] = 0 }
@@ -497,122 +597,56 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
                 return noErr
             }
 
-            // 新请求 → 复位渲染侧状态
+            // 新请求 → 复位渲染侧状态 (srcBuf 已由请求线程复位)
             if g != self.curGen {
                 self.curGen = g
-                self.srcBuf.removeAll(keepingCapacity: true)
-                self.srcPos = 0
-                self.curRate = 24000
                 self.dumpActive = dump
-                self.dbg.removeAll(keepingCapacity: true)
-                self.probeSegIdx = -1
             }
 
-            var step = self.curRate / self.outputBus.format.sampleRate
-            let needed = Int(ceil(Double(frameCount) * step)) + 2
-
-            // 拉取源样本: 当前段读尽 → 退役 → 切下一段 (阻塞至有数据/段结束)
-            var scratch = [Int16](repeating: 0, count: max(needed, 1))
-            var total = 0
-            var allDone = false
-            var segWaitMs = 0
-            while total < needed {
+            /* 饥饿有界等待: feeder 尚未供数 (MS 首块/冷推理) → 4ms 粒度等;
+             * prefetchDone 后不再等 (剩余缓冲播完即 Complete) */
+            var waitedMs = 0
+            var starved = false
+            var dumpCopy: [Float] = []
+            repeat {
                 self.stateLock.lock()
-                let idx = self.currentIdx
-                let planCount = self.plans.count
-                let st = idx < self.streams.count ? self.streams[idx] : nil
-                let attempted = idx < self.started.count ? self.started[idx] : true
-                let gain = idx < self.plans.count ? self.plans[idx].gain : 1
-                let nextRate = self.rates.indices.contains(idx) ? self.rates[idx] : 24000
-                var segEngine = "-", segRate: Int32 = 0, segText = ""
-                if idx < self.plans.count {
-                    segEngine = self.plans[idx].engine
-                    segRate = self.plans[idx].rate
-                    segText = String(self.plans[idx].text.prefix(16))
-                }
+                starved = self.srcPos >= self.srcBuf.count
+                allDone = self.prefetchDone
+                isCancelled = self.cancelled
                 self.stateLock.unlock()
+                if isCancelled || allDone || !starved || g != self.gen { break }
+                usleep(4000)
+                waitedMs += 4
+            } while waitedMs < 15_000
 
-                if idx >= planCount { allDone = true; break }
-                if nextRate > 0 && Double(nextRate) != self.curRate {
-                    self.curRate = Double(nextRate)   // 段切换: 重采样率随段换
-                    step = self.curRate / self.outputBus.format.sampleRate
-                }
-                if st == nil {
-                    if !attempted {
-                        // 段尚未启动: 促发启动线程并等待 (兜底防启动线程早退死等)
-                        self.scheduleStarter()
-                        usleep(50_000)
-                        segWaitMs += 50
-                        if segWaitMs > 10_000 {   // 启动超时 → 按失败跳段
-                            self.stateLock.lock()
-                            self.currentIdx += 1
-                            self.stateLock.unlock()
-                        }
-                        continue
-                    }
-                    // 启动失败 → 跳段
-                    self.stateLock.lock()
-                    self.currentIdx += 1
-                    self.stateLock.unlock()
-                    continue
-                }
-
-                var done: Int32 = 0
-                let got = mtts_stream_read(st!, &scratch[total], Int32(needed - total), &done)
-                if got > 0 {
-                    if idx > self.probeSegIdx, let t0 = probeT0 {
-                        self.probeSegIdx = idx
-                        let ms = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000
-                        Self.probeLatency(ms, engine: segEngine, rate: segRate, text: segText)
-                    }
-                    let base = total
-                    self.srcBuf.reserveCapacity(self.srcBuf.count + Int(got))
-                    for i in 0..<Int(got) {
-                        self.srcBuf.append(Float(scratch[base + i]) / 32768.0 * gain)
-                    }
-                    total += Int(got)
-                    if self.dumpActive {
-                        self.dbg.append(contentsOf: self.srcBuf.suffix(Int(got)))
-                    }
-                }
-                if done != 0 || got == 0 {
-                    // 段读尽: 退役 (若未被新请求顶替) 并推进
-                    self.stateLock.lock()
-                    if idx < self.streams.count && self.streams[idx] == st {
-                        self.retired.append(st!)
-                        self.streams[idx] = nil
-                        self.currentIdx = idx + 1
-                    }
-                    self.stateLock.unlock()
-                    self.scheduleStarter()   // 渲染推进 → 促发下一段启动
-                }
-            }
-
-            // 线性重采样输出
+            // 顺序消费 + 已消费区定期回收 (锁内; 逐样本直拷, 无重采样)
+            self.stateLock.lock()
             var hitEnd = false
-            for i in 0..<Int(frameCount) {
-                let i0 = Int(self.srcPos)
-                if i0 + 1 < self.srcBuf.count {
-                    let frac = Float(self.srcPos - Double(i0))
-                    out[i] = self.srcBuf[i0] * (1 - frac) + self.srcBuf[i0 + 1] * frac
-                } else {
-                    out[i] = 0
-                    if allDone { hitEnd = true }
+            if g == self.gen {
+                let count = self.srcBuf.count
+                for i in 0..<Int(frameCount) {
+                    if self.srcPos < count {
+                        out[i] = self.srcBuf[self.srcPos]
+                        self.srcPos += 1
+                    } else {
+                        out[i] = 0
+                        if allDone { hitEnd = true }
+                    }
                 }
-                self.srcPos += step
+                if self.srcPos > 65536 {
+                    self.srcBuf.removeFirst(self.srcPos)
+                    self.srcPos = 0
+                }
+            } else {
+                for i in 0..<Int(frameCount) { out[i] = 0 }
             }
-
-            // 已消费区定期回收
-            if self.srcPos > 65536 {
-                let drop = Int(self.srcPos)
-                self.srcBuf.removeFirst(min(drop, self.srcBuf.count))
-                self.srcPos -= Double(drop)
-            }
+            if hitEnd && self.dumpActive { dumpCopy = self.dbg }
+            self.stateLock.unlock()
 
             if hitEnd {
                 actionFlags.pointee.insert(.offlineUnitRenderAction_Complete)
                 if self.dumpActive {
-                    self.writeDebugWav(self.dbg, self.dbgRate)
+                    self.writeDebugWav(dumpCopy, Int(self.outputBus.format.sampleRate))
                 }
             }
             return noErr
@@ -620,7 +654,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
     }
 
     /// 调试转储 (默认关闭; 触碰 <容器>/Engines/.debug/dump 开启):
-    /// 渲染结束时把引擎侧输出写为 .debug/last_<n>.wav (轮转 8 个).
+    /// 渲染结束时把实际播放时间线写为 .debug/last_<n>.wav (轮转 8 个).
     private func writeDebugWav(_ pcm: [Float], _ sr: Int) {
         guard pcm.count > 0 else { return }
         let dir = MagicPaths.enginesRoot.appendingPathComponent(".debug", isDirectory: true)
