@@ -27,7 +27,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
     // MARK: - 调试探针 (统一日志对未签名构建不可用 → 写文件)
 
     private static func probeMarkStatic(_ name: String) {
-        let dir = MagicPaths.enginesRoot.appendingPathComponent(".debug", isDirectory: true)
+        let dir = MagicPaths.stateRoot.appendingPathComponent(".debug", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent("entry_trace.txt")
         let line = "\(Date()) \(name)\n"
@@ -50,7 +50,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
     }
 
     private static func probeWrite(_ line: String) {
-        let dir = MagicPaths.enginesRoot.appendingPathComponent(".debug", isDirectory: true)
+        let dir = MagicPaths.stateRoot.appendingPathComponent(".debug", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent("latency.txt")
         let full = "\(Date()) \(line)"
@@ -80,6 +80,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
             let root = MagicPaths.enginesRoot.path
             let ready = mtts_global_scan(root)
             NSLog("[MagicTTS] bridge scan: \(ready) 个引擎物料就绪")
+            Self.probeMarkStatic("bridge-scan root=\(root) ready=\(ready)")
             scanned = true
             /* 后台预热上次使用的语音 (HD 模型冷启 ~650ms 治理):
              * 守护进程上下文 scan=0 → 不触发 (重初始化红线);
@@ -163,7 +164,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
     public override var speechVoices: [AVSpeechSynthesisProviderVoice] {
         get {
             var mode = 0
-            if let s = try? String(contentsOf: MagicPaths.enginesRoot.appendingPathComponent("voicemode.txt"),
+            if let s = try? String(contentsOf: MagicPaths.stateRoot.appendingPathComponent("voicemode.txt"),
                                     encoding: .utf8),
                let m = Int(s.trimmingCharacters(in: .whitespacesAndNewlines)) {
                 mode = m
@@ -229,7 +230,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
             }
             /* 探针: 系统查询语音列表时留痕 (统一日志对未签名构建不可用) */
             Self.probeMarkStatic("speechVoices-get")
-            let mark = MagicPaths.enginesRoot.appendingPathComponent(".debug/voices_queried.txt")
+            let mark = MagicPaths.stateRoot.appendingPathComponent(".debug/voices_queried.txt")
             let report = "\(Date()) mode=\(mode) 上报\(voices.count)条: "
                 + voices.map(\.identifier).joined(separator: ", ") + "\n"
             try? report.write(to: mark, atomically: true, encoding: .utf8)
@@ -308,7 +309,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
         prefetchDone = newPlans.isEmpty
         reqStart = newPlans.isEmpty ? nil : .now()   // 延迟探针起点
         dumpAudio = FileManager.default.fileExists(
-            atPath: MagicPaths.enginesRoot.appendingPathComponent(".debug/dump").path)
+            atPath: MagicPaths.stateRoot.appendingPathComponent(".debug/dump").path)
         if !newPlans.isEmpty {
             plans = newPlans
             streams = [OpaquePointer?](repeating: nil, count: plans.count)
@@ -647,7 +648,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
     /// 渲染结束时把实际播放时间线写为 .debug/last_<n>.wav (轮转 8 个).
     private func writeDebugWav(_ pcm: [Float], _ sr: Int) {
         guard pcm.count > 0 else { return }
-        let dir = MagicPaths.enginesRoot.appendingPathComponent(".debug", isDirectory: true)
+        let dir = MagicPaths.stateRoot.appendingPathComponent(".debug", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let stamp = Int(Date().timeIntervalSince1970) % 100000
         let url = dir.appendingPathComponent("last_\(stamp).wav")

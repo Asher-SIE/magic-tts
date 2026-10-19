@@ -5,7 +5,7 @@ import Foundation
 /// Info.plist: NSExtensionPrincipalClass = $(PRODUCT_MODULE_NAME).MagicAUExtensionController
 
 private func probeMark(_ name: String) {
-    let dir = MagicPaths.enginesRoot.appendingPathComponent(".debug", isDirectory: true)
+    let dir = MagicPaths.stateRoot.appendingPathComponent(".debug", isDirectory: true)
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     let url = dir.appendingPathComponent("entry_trace.txt")
     let line = "\(Date()) \(name)\n"

@@ -144,7 +144,7 @@ struct RuleBook {
 /// 规则存取: App 写 rules.json, 扩展每请求读。与 scheme.json 同目录同模式:
 /// shared() 按文件修改时间缓存, App 改完规则即时生效, 无需重装扩展。
 enum RuleStore {
-    static var url: URL { MagicPaths.enginesRoot.appendingPathComponent("rules.json") }
+    static var url: URL { MagicPaths.stateRoot.appendingPathComponent("rules.json") }
 
     static func load() -> [ReadingRule] {
         guard let data = try? Data(contentsOf: url),

@@ -131,20 +131,24 @@ open -a ~/Applications/MagicTTS.app       # 启动即刷新发音人注册
 
 ## 引擎数据
 
-运行位置：`~/Library/Containers/com.magictts.voices.synth/Data/Engines/<key>/`
-（**appex 自有沙盒容器**。曾用 App Group 容器——沙盒扩展读组容器会被 TCC 视为
-"访问其他 App 的数据"，每句合成都弹权限框且授权记不住；自有容器根治。
-宿主 App 不沙盒化，直接读同一绝对路径，首启最多弹一次框且会被记住。）
+引擎物料（只读）随包分发：`MagicTTS.app/Contents/PlugIns/MagicTTSSynth.appex/
+Contents/Resources/Engines/<key>/`，构建时从 `resources/engines/` 整目录拷入
+**appex 包体**（合成宿主进程的沙盒只放行 appex 自身 bundle 树，物料放宿主 App
+的 Resources 下读不到 → say 空音频，2026-10-19 实测）——分发一个 .app 即自包含，
+无装后填充。可写状态（`scheme.json` / `rules.json` / `.debug`）仍在 appex 自有
+沙盒容器 `~/Library/Containers/com.magictts.voices.synth/Data/Engines/`（曾用
+App Group 容器——沙盒扩展读组容器会被 TCC 视为"访问其他 App 的数据"，每句合成
+都弹权限框且授权记不住；自有容器根治。宿主 App 不沙盒化，直接读同一绝对路径，
+首启最多弹一次框且会被记住）。
 
 ```bash
-./scripts/populate-engines.sh             # yongde←项目资源; MS←旧容器或从零
 ./scripts/fetch-ms-sdk.sh                 # 从零: 下载微软 Speech SDK 运行库
 ./scripts/fetch-voice-models.sh <用户名> <密码>   # 从零: 下载语音包 (需广荣服务器账号)
 ```
 
 - `yongde/`: `voices/ydvoice00-04.vl`（24B 头 + 24576×8B 稀疏索引 + PCM）+
   `pinyin.txt`（41923 字）+ `phrases.txt`（47120 词组）
-- `naturalvoice|onecore/`: 3 个 dylib + `model/<包>/` + `voice.txt`
+- `naturalvoice|onecore/`: 4 个 dylib + `model/<包>/` + `voice.txt`
 
 ## 项目内资源（自包含，不再依赖旧工作区素材）
 
@@ -155,16 +159,17 @@ open -a ~/Applications/MagicTTS.app       # 启动即刷新发音人注册
 
 ```
 resources/
-├── yongde/
-│   ├── voices/ydvoice00-04.vl   # 全部 5 个音色语音库 (~51M, 未入 git)
-│   └── pinyin.txt / phrases.txt # 拼音词典
-└── ms-voices/                   # NeuralVoices 微软语音包离线备份 (1.4G, 14 包 / 7 个 license 型, 未入 git)
+├── engines/                              # 引擎物料备份/开发源 (构建时整目录拷入 appex 包体)
+│   ├── yongde/                           #   53M: voices/*.vl + 拼音词典 (词典入 git)
+│   ├── naturalvoice/                     #  444M: dylib + model/ (二进制未入 git)
+│   └── onecore/                          #  1.3G: dylib + model/ (二进制未入 git)
+└── ms-voices/                            # NeuralVoices 微软语音包离线备份 (1.4G, 14 包 / 7 个 license 型, 未入 git)
 ```
 
-永德数据以 `resources/yongde` 为权威源，`populate-engines.sh` 默认从这里安装；
-MS 引擎数据体量大（容器内现 924M），运行态由容器 + 下载脚本承担，语音包离线
-备份在 `resources/ms-voices/NeuralVoices/`（含 7 个 HD `.license` 包；
-`fetch-voice-models.sh` 依赖广荣服务器账号，未必随时可下）。
+`resources/engines/` 为引擎物料的唯一权威源；增删发音人包后重跑
+`build-clt.sh` 重装即生效。MS 语音包原始下载备份在 `resources/ms-voices/
+NeuralVoices/`（含 7 个 HD `.license` 包；`fetch-voice-models.sh` 依赖广荣
+服务器账号，未必随时可下）。
 2026-10-18 工作区收敛至本仓库：反编译树/其他平台包/APK/引擎二进制
 （tts.apk、grtts.nvda-addon、VVTTS 素材、libyongde_tts.so 等）已删除，
 仅保留运行所需语音数据；逆向结论以 docs/ 与 git 历史为准。
@@ -179,7 +184,7 @@ swift scripts/check_system_voices.swift   # 语音目录 + AU 组件 + 探针 �
 
 ```bash
 clang -std=c11 -IBridge/include -o /tmp/mtts_cli scripts/test_cli.c Bridge/*.c -ldl -lpthread
-MT_ENGINES="$HOME/Library/Containers/com.magictts.voices.synth/Data/Engines" \
+MT_ENGINES="$HOME/Applications/MagicTTS.app/Contents/PlugIns/MagicTTSSynth.appex/Contents/Resources/Engines" \
   /tmp/mtts_cli yongde "中东西通红龙用"
 say -v '永德·语音0' "中东西通红龙用"
 say -v '语音方案·一' "中文与English混读，NVDA version 3.14，字母Z分组。"   # 默认方案 = Eddy 中文+英文 (Kona)

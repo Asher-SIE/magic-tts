@@ -28,9 +28,9 @@ enum EngineRegistry {
 
     /// 扫描引擎与发音人 (轻量, 毫秒级; 重初始化由 appex 端按需/预热).
     static func engines() -> [EngineStatus] {
+        // enginesRoot 为只读包体路径, 不建目录 (mkdir 会污染 app bundle)
         let fm = FileManager.default
         let root = MagicPaths.enginesRoot
-        try? fm.createDirectory(at: root, withIntermediateDirectories: true)
 
         _ = mtts_global_scan(root.path)
 

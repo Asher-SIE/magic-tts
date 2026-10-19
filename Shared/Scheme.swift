@@ -94,7 +94,7 @@ enum SchemeStore {
     ]
 
     static var url: URL {
-        MagicPaths.enginesRoot.appendingPathComponent("scheme.json")
+        MagicPaths.stateRoot.appendingPathComponent("scheme.json")
     }
 
     static func defaults() -> [String: Scheme] {

@@ -84,6 +84,18 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+# —— 引擎物料 (只读, 随包分发): resources/engines 整目录拷入 appex 包体.
+# 装在 appex 而非 App 内 — 合成宿主沙盒只放行 appex 自身 bundle 树
+# (App/Contents/Resources 下宿主读不到 → 空音频, 2026-10-19 实测).
+# 分发自包含 — 装一个 .app 即可用, 无装后填充; 签名前就位 (Resources 入封). ——
+if [ -d "resources/engines" ]; then
+    mkdir -p "$APPEX/Contents/Resources"
+    cp -Rc "resources/engines" "$APPEX/Contents/Resources/Engines"
+    echo "已装入引擎物料: $(du -sh "$APPEX/Contents/Resources/Engines" | cut -f1)"
+else
+    echo "错误: 缺少 resources/engines (备份/开发源, 见 README)"; exit 1
+fi
+
 # —— 签名 (appex 先签, 再签 App 整体; 均带沙盒+AppGroup entitlements) ——
 # 优先用钥匙串里的真实证书 (TCC 权限授权可被系统记住, 免每次弹框);
 # 无证书时退回 ad-hoc (TCC 每次访问组容器都可能重新询问).
