@@ -11,7 +11,9 @@ OUT="build"
 APP="$OUT/MagicTTS.app"
 APPEX="$APP/Contents/PlugIns/MagicTTSSynth.appex"
 
-rm -rf "$OUT"
+# 只清理本脚本的产物, 不动 build/ 下其他文件 (分发 zip / 手工备份等)
+# — rm -rf 整个 build 曾把 MagicTTS-dist.zip 一并抹掉
+rm -rf "$APP" "$OUT/obj"
 mkdir -p "$APP/Contents/MacOS" "$APPEX/Contents/MacOS"
 
 # —— C 桥预编译为 .o (swiftc 的二级 clang 不转发 -Xcc include, 故分开编) ——
