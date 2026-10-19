@@ -6,3 +6,4 @@ resources/ms-voices/
 resources/engines/yongde/voices/
 resources/engines/*/model/
 resources/engines/**/*.dylib
+grtts/
