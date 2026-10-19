@@ -6,7 +6,11 @@
  *     -L"$HOME/Library/Group Containers/com.magictts.shared/Engines/naturalvoice" \
  *     -lMicrosoft.CognitiveServices.Speech.core -Wl,-rpath,\
  *     "$HOME/Library/Group Containers/com.magictts.shared/Engines/naturalvoice"
- * 用法: /tmp/ms_stream_probe <引擎key> [文本]
+ * 用法: /tmp/ms_stream_probe <引擎key> [文本] [mode] [包目录名] [parent|leaf]
+ *   包目录名: 指定 model/ 下某个包 (否则取第一个 .license 包);
+ *     .key 包自动以 "Key:"+内容 作凭证 (docs/NOTES-win-re-ms-voices.md §2)
+ *   第 5 参: add_path 粒度 — parent=父目录(旧基线) / leaf=模型叶子目录
+ *     (Windows 同款, <LCID>.INI 生效处), 默认 parent
  */
 #include <dirent.h>
 #include <dlfcn.h>
@@ -29,9 +33,8 @@ static double now_ms(void) {
 static char g_root[1024];
 
 /* 拉包信息: model/ 下第一个 SynthModel.license 包 → 完整语音名 + license
- * (⚠️ 不挑 .key 包 — 测 .key 须走适配器路径或扩展本函数:
- *  凭证 = "Key:"+SynthModel.key 内容, 见 docs/NOTES-win-re-ms-voices.md §2) */
-static char pkg_dir[512], voice_full[256];
+ * want_pkg 指定时用该包, 凭证 .license 全文 / .key 为 "Key:"+内容 */
+static char pkg_dir[512], voice_full[256], vdir[256];
 static char *lic = NULL;
 
 static char *read_all(const char *p) {
@@ -45,7 +48,7 @@ static char *read_all(const char *p) {
     return b;
 }
 
-static void pick_pkg(const char *key) {
+static void pick_pkg(const char *key, const char *want_pkg) {
     char modeldir[1024];
     snprintf(modeldir, sizeof(modeldir), "%s/%s/model", g_root, key);
     DIR *d = opendir(modeldir);
@@ -53,6 +56,7 @@ static void pick_pkg(const char *key) {
     struct dirent *e;
     while ((e = readdir(d))) {
         if (e->d_name[0] == '.') continue;
+        if (want_pkg && !strstr(e->d_name, want_pkg)) continue;
         char p[1280];
         snprintf(p, sizeof(p), "%s/%s/SynthModel.license", modeldir, e->d_name);
         if (access(p, R_OK) == 0) {
@@ -60,9 +64,19 @@ static void pick_pkg(const char *key) {
             lic = read_all(p);
             break;
         }
+        snprintf(p, sizeof(p), "%s/%s/SynthModel.key", modeldir, e->d_name);
+        if (access(p, R_OK) == 0) {
+            snprintf(pkg_dir, sizeof(pkg_dir), "%s", e->d_name);
+            char *k = read_all(p);
+            if (k) {
+                asprintf(&lic, "Key:%s", k);
+                free(k);
+            }
+            break;
+        }
     }
     closedir(d);
-    if (!pkg_dir[0]) { fprintf(stderr, "no license pkg\n"); exit(1); }
+    if (!pkg_dir[0]) { fprintf(stderr, "no pkg%s%s\n", want_pkg ? ": " : "", want_pkg ? want_pkg : ""); exit(1); }
     /* Tokens.xml 完整名 */
     char dd[1280];
     snprintf(dd, sizeof(dd), "%s/%s/model/%s/data", g_root, key, pkg_dir);
@@ -71,7 +85,7 @@ static void pick_pkg(const char *key) {
     while (d2 && (e = readdir(d2))) {
         if (e->d_name[0] == '.') continue;
         snprintf(tokens, sizeof(tokens), "%s/%s/Tokens.xml", dd, e->d_name);
-        if (access(tokens, R_OK) == 0) break;
+        if (access(tokens, R_OK) == 0) { snprintf(vdir, sizeof(vdir), "%s", e->d_name); break; }
         tokens[0] = 0;
     }
     if (d2) closedir(d2);
@@ -185,14 +199,22 @@ int main(int argc, char **argv) {
     const char *key = argc > 1 ? argv[1] : "naturalvoice";
     const char *text = argc > 2 ? argv[2] : "这是流式合成实验，第一句测试延迟。第二句稍微长一点，用来观察分块到达的时间。";
     int mode = argc > 3 ? atoi(argv[3]) : 1;   /* 1=空acfg+start 2=wav+start+文件跟随 3=空acfg+speak同步+事件 */
+    const char *want_pkg = argc > 4 ? argv[4] : NULL;
+    int leaf = argc > 5 && strcmp(argv[5], "leaf") == 0;
+    int bare = argc > 6 && strcmp(argv[6], "bare") == 0;   /* .key 裸传内容(无 Key: 前缀), 验证错误分流 */
     const char *root = getenv("MTTS_ROOT");
     if (root)
         snprintf(g_root, sizeof(g_root), "%s", root);
     else
         snprintf(g_root, sizeof(g_root), "%s/Library/Group Containers/com.magictts.shared/Engines", getenv("HOME"));
 
-    pick_pkg(key);
-    printf("包: %s\n语音: %s\nlicense: %zu字节\n", pkg_dir, voice_full, strlen(lic));
+    pick_pkg(key, want_pkg);
+    if (bare && lic && strncmp(lic, "Key:", 4) == 0) {   /* 剥前缀: 裸传 key 内容 */
+        char *b = strdup(lic + 4);
+        free(lic); lic = b;
+    }
+    printf("包: %s\n语音: %s\nvdir: %s\n凭证(%s): %zu字节\n", pkg_dir, voice_full, vdir,
+           lic && strncmp(lic, "Key:", 4) == 0 ? "Key:前缀" : (bare ? "裸传(无前缀)" : "license全文"), strlen(lic));
 
     char dy[1024];
     snprintf(dy, sizeof(dy), "%s/%s/libMicrosoft.CognitiveServices.Speech.core.dylib", g_root, key);
@@ -222,8 +244,11 @@ int main(int argc, char **argv) {
     double t0 = now_ms();
     h cfg = 0;
     char modeldir[1024];
-    snprintf(modeldir, sizeof(modeldir), "%s/%s/model", g_root, key);
-    if (cfg_create(&cfg) || cfg_add_path(cfg, modeldir)) { fprintf(stderr, "fromPath失败\n"); return 3; }
+    if (leaf)
+        snprintf(modeldir, sizeof(modeldir), "%s/%s/model/%s/data/%s", g_root, key, pkg_dir, vdir);
+    else
+        snprintf(modeldir, sizeof(modeldir), "%s/%s/model", g_root, key);
+    if (cfg_create(&cfg) || cfg_add_path(cfg, modeldir)) { fprintf(stderr, "fromPath失败: %s\n", modeldir); return 3; }
     int rc = cfg_set_voice(cfg, voice_full, lic);
     printf("set_voice rc=0x%x (init %.0fms)\n", rc, now_ms() - t0);
     h bag = 0;
@@ -271,24 +296,27 @@ int main(int argc, char **argv) {
             if (r2) release_result(r2);
             printf("第%d句 start rc=0x%x\n", round + 1, rc2);
             if (rc2 != 0) return 6;
-            long last = -1;
-            /* 等 completed 事件 (cb_completed 置 done), 再 3 轮确认尺寸收尾 */
+            long last = -1; int stable = 0; double t_fa = -1;
+            /* 边合成边记录文件增长 (首音频=首次非零), 完成事件+尺寸稳定后收尾 */
             pthread_mutex_lock(&mu); done = 0; pthread_mutex_unlock(&mu);
-            for (int i = 0; i < 6000; i++) {
+            for (int i = 0; i < 9000; i++) {
                 pthread_mutex_lock(&mu); int fin = done; pthread_mutex_unlock(&mu);
-                if (fin) break;
-                usleep(10000);
-            }
-            for (int i = 0; i < 300; i++) {
                 FILE *f = fopen(wavpath, "rb");
                 long sz = 0;
                 if (f) { fseek(f, 0, SEEK_END); sz = ftell(f); fclose(f); }
-                if (sz > 0 && sz == last) break;
-                last = sz;
+                if (sz != last) {
+                    if (sz > 0) {
+                        if (t_fa < 0) t_fa = now_ms() - t_start;
+                        printf("  t=%6.0fms  累计 %7ld (%.2fs)  +%ld\n",
+                               now_ms() - t_start, sz, sz / 48000.0, last < 0 ? sz : sz - last);
+                    }
+                    last = sz; stable = 0;
+                } else if (sz > 0) stable++;
+                if (fin && sz > 0 && stable >= 3) break;
                 usleep(10000);
             }
-            printf("第%d句 文件=%ld字节 (%.2fs音频) 完成于 %.0fms\n",
-                   round + 1, last, last / 48000.0, now_ms() - t_start);
+            printf("第%d句 文件=%ld字节 (%.2fs音频) 首音频=%.0fms 完成于 %.0fms\n",
+                   round + 1, last, last / 48000.0, t_fa, now_ms() - t_start);
             FILE *c2 = fopen(wavpath, "wb"); if (c2) fclose(c2);
             if (mode == 5) { stop_speaking(synth); usleep(150000); }
         }

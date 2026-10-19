@@ -176,11 +176,11 @@ Ava HD 667 / Eric 173 / Michelle 217 (ms) — 非"晓晓专属", 是 **HD 模型
   (⚠️ 修正 2026-10-19 逆向, 见 NOTES-win-re-ms-voices.md §3: "适配层无法移除"
   结论存疑 — Windows 侧无此惩罚且 add_path 传 `data/<VoiceId>` 叶子目录,
   `<LCID>.INI` 随之生效: HDVoiceSeqLen=5(未读到 INI 时引擎默认 24)+
-  关输出缓冲/节流。适配器已改传叶子目录, 本矩阵需复测后再下结论;
-  复核 2026-10-19 静态 (NOTES-win-re-ms-voices.md §8.2): 本机 1.48.2 公开版
-  4 个 dylib 均无 HDVoiceSeqLen/EnableBuffer 等 INI 键名甚至 ".INI" 串 —
-  该构建不读 INI, 叶子目录对延迟无影响, 原判"内在成本"大概率成立,
-  复测仅作闭环);
+  关输出缓冲/节流。适配器已改传叶子目录;
+  复测 2026-10-19 A/B 实测 (NOTES-win-re-ms-voices.md §9.3): 父/叶子目录
+  两轮热态首音频均 134ms、字节流逐块一致 — 台阶延迟与 add_path 粒度无关,
+  原判"内在成本"以 A/B 实证恢复成立。注: 1.48.2 其实含全套 HD INI 键名
+  (UTF-16LE 存放, ASCII 搜索搜不到), 但至少 SeqLen/缓冲项不影响首块时机);
 - 用户感知: dual2 主侧=晓晓 HD @220 → 每句开头 ~120-190ms (方案里英文
   段多为后续段, 被流水线掩盖故"只有晓晓明显"); 冷启 ~650ms 已由
   .lastvoice 预热治理。极致低延迟场景可配非 HD (Eric/Michelle) 或

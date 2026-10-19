@@ -237,19 +237,23 @@ macOS 实现的两处真实偏差（.key 凭证格式、add_path 路径粒度）
 #4（降级 1.45.x）大概率不需要。动态实测仍待做（拷 .key 包入
 Engines/<key>/model + 重装即触发）。
 
-### 8.2 INI 调优键在 1.48.2 全缺 — §3 的 SeqLen 线索对 macOS 不成立
+### 8.2 ~~INI 调优键在 1.48.2 全缺~~ — 已撤回: 键名在, 但是 **UTF-16LE** 编码
 
-4 个 dylib（core / embedded.tts / onnxruntime / kws.ort）二进制 grep 均无：
-HDVoiceSeqLen / EnableBuffer / BatchSize / EnableThrottling / EnableHDVoice /
-HDAMModelPath / HDVocoderModelPath / HDVoiceThreshold，甚至无 ".INI" 字符串
-（"Tokens.xml" 在 embedded.tts 有）。这些键名 13+ 字符不可能编为立即数，
-只能是 rodata 字符串，缺失即代码不存在。
+⚠️ 本节初版结论作废: 当时只用 ASCII/strings 搜索, 而 1.48.2 的 embedded.tts
+把全部配置键名以 UTF-16LE 存储, ASCII 搜索必然空手 (教训: 二进制搜串两种
+编码都要试)。纠正后的静态事实:
 
-判定：1.48.2 公开版不读 `<LCID>.INI`；叶子目录 add_path 与 Windows 对齐
-无害且更正确，但对 HD 首块延迟没有 INI 层面的影响。HD ~120ms 台阶延迟
-在 1.48.2 上大概率仍是该构建的内在成本（NOTES-ms-streaming 原判大概率成立），
-实验 #2 复测预期无变化，仅作闭环。Windows 侧无此惩罚的差异归因于
-1.45.0 内部构建含 INI 调优管线（SeqLen=5 等），公开版裁掉了。
+- macOS 1.48.2 embedded.tts **有完整 HD INI 键集** (UTF-16LE): HDVoiceSeqLen /
+  HDVoiceThreshold / EnableHDVoice / HDAMModelPath / HDVocoderModelPath /
+  EnableBuffer / EnableThrottling / BatchSize / FirstBatchSize / VocoderModel /
+  ThrottlingFactor / EnableStopControl — 与 Windows 1.45.0 (NeuralVoices/azure
+  那份) 的键表同源;
+- Windows 物料里有两份 SDK: `synthDrivers/` 根下那份较老 (有 Output.* 键但
+  **无** HD 键集), `NeuralVoices/azure/cognitiveservices/speech/lib/x64` 那份
+  才是逆向报告的对象 (HD 键集 + `Key:`/`##Encrypted##` 齐全)。两份都用
+  UTF-16LE 存键名;
+- "INI 键在 → 叶子目录会影响 HD 延迟" 的推断恢复为开放问题 → 由 §9 实验 #2
+  的 A/B 实测回答 (结论: 不影响)。
 
 ### 8.3 模型物料加密形态（resources/ms-voices 本地复核）
 
@@ -262,6 +266,49 @@ HDAMModelPath / HDVocoderModelPath / HDVoiceThreshold，甚至无 ".INI" 字符�
 
 ### 8.4 实验清单修订
 
-- #1：静态证据已过，只待动态实测；
-- #2：预期无变化（§8.2），保留作闭环；
-- #4：大概率不需要，降为 #1 失败时才做。
+- #1：静态证据已过 → §9 动态实测**通过**；
+- #2：已做（§9.3），叶子/父目录无差别；
+- #4：不需要（1.48.2 支持 Key:，见 §8.1 与 §9.1）。
+
+## 9. macOS 动态实测（2026-10-19，实验清单闭环）
+
+工具: ms_stream_probe.c 扩展版（指定包 / .key 自动加 `Key:` 前缀 /
+add_path 父/叶可选 / 序列模式逐块时间线），SDK = 本机 1.48.2 公开版。
+
+### 9.1 实验 #1 通过 — .key 包 + "Key:"+内容 可用
+
+- 云希（.key 包，94 字节凭证）: set_voice rc=0，completed reason=9
+  （SynthesizingAudioCompleted），1.74s 真实音频；**热态首音频 25ms**
+  （非 HD 模型，无台阶），冷启首句 164ms；
+- 适配器全链路（test_cli → ms_embedded_adapter → ms_get_session）同样通过:
+  会话就绪、启动 7.9ms、首块 110ms（含首次模型加载）；
+- 英文包抽测 Aria 同样通过（首块 83ms）→ 7 把同源主密钥的 .key 包全部可用。
+
+### 9.2 实验 #3A 通过 — 裸传 key 内容立即失败
+
+同一云希包去掉 `Key:` 前缀（仅传 90 字符）→ 两句均 ~42-51ms canceled、
+零字节 — 复现并解释了 10-17 的 reason=1：引擎把 key 内容当 license 文本
+校验必然失败。前缀分流在 1.48.2 上与 Windows 行为一致。
+
+### 9.3 实验 #2 结果 — 叶子目录对 HD 延迟无影响（A/B 实测）
+
+晓晓 HD，序列模式两句（第 1 句冷启、第 2 句热态），add_path 父目录 vs
+叶子目录各跑一遍：
+
+| add_path | 冷启首音频 | 热态首音频 | 音频字节 |
+|---|---|---|---|
+| 父目录（旧基线） | 1025ms | 134ms | 116400 / 107352 |
+| 叶子目录（新） | 730ms | **134ms** | 116400 / 107352 |
+
+两轮字节流与到达节奏**逐块一致** → 管线行为完全相同。热态 ~134ms 台阶
+与 NOTES-ms-streaming 矩阵（108-190ms）吻合，**与 add_path 粒度无关**。
+冷启差异（1025 vs 730）为单次采样的噪声量级，不作结论。
+→ HD 台阶延迟在 1.48.2 上维持"SDK/模型内在成本"原判（现在有 A/B 实证）。
+INI 键集虽然存在（§8.2 纠正版），但至少 SeqLen/缓冲项不影响首块时机。
+
+### 9.4 落地 — 14 包全数装入
+
+onecore 补齐全部 7 个 .key 包（+原 5 个 license 包 = 12 发音人），
+naturalvoice 保持 3 个 license 包。适配器扫描/合成均验证。
+"为什么 Windows 能 14 个而 macOS 只有 7 个"（报告问题 1）至此闭环:
+根因 = 凭证前缀约定，已修复。

@@ -16,11 +16,12 @@ TTS 引擎注册为系统语音（VoiceOver / 朗读内容 / `say` 均可用）�
 
 - 永德：`voices/` 下每个 `ydvoiceNN.vl` 就是一个发音人，首次使用某发音人时加载；
 - MS 引擎：`model/` 下每个含 `SynthModel.license` 或 `SynthModel.key` 的包 = 一个
-  发音人（懒建会话）。`.key` 包需按 Windows 逆向结论以 **`"Key:"+key内容`** 传入
+  发音人（懒建会话）。`.key` 包以 **`"Key:"+key内容`** 传入
   `set_speech_synthesis_voice`（之前裸传 key 内容 → reason=1；主密钥与全部细节见
-  `docs/NOTES-win-re-ms-voices.md`，待 macOS 实测确认）。NeuralVoices 共 14 包（离线
-  备份在 `resources/ms-voices/NeuralVoices/`），license 型 7 个已全部装入（中文 3 +
-  英文 4），.key 型 7 个待实测。想再增加发音人：用 `scripts/fetch-voice-models.sh`
+  `docs/NOTES-win-re-ms-voices.md`，2026-10-19 已在 macOS 1.48.2 实测通过：
+  裸传即失败、带前缀即可用，云希热态首音频 25ms）。NeuralVoices 共 14 包，已全数
+  装入（onecore 12 + naturalvoice 3，晓晓 HD 双份；.key 型 7 个 2026-10-19 实测
+  通过并补装）。想再增加发音人：用 `scripts/fetch-voice-models.sh`
   下载另一个包放进 `Engines/<key>/model/`，重装 App 即自动列出。
   `voice.txt`（完整语音名）可指定该引擎的默认发音人。语音 locale 按包目录名
   尾段解析（en-US/zh-TW 等），未知回退引擎级。
