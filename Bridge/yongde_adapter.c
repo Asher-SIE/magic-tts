@@ -609,6 +609,34 @@ static void yd_apply_prosody(pcmbuf *out, int rate, int pitch) {
     }
 }
 
+/* 小数点强制朗读: 永德引擎丢弃 "." (3.14 读成 3 14) → 数字间小数点
+ * 改写为 "点"。实测 "3点14" 与 "三点一四" 输出逐样本一致 (引擎对点后
+ * 数字逐位读), 字母间 "." (A.txt / e.g.) 与数值边界 (2024-2025) 不受影响。
+ * 返回 NULL = 无需改写 (直接用原文)。 */
+static char *yd_expand_decimal(const char *in) {
+    size_t ndot = 0;
+    for (size_t i = 0; in[i]; i++) {
+        unsigned char prev = i > 0 ? (unsigned char)in[i - 1] : 0;
+        unsigned char next = (unsigned char)in[i + 1];
+        if (in[i] == '.' && prev >= '0' && prev <= '9' && next >= '0' && next <= '9')
+            ndot++;
+    }
+    if (!ndot) return NULL;
+    char *out = malloc(strlen(in) + ndot * 2 + 1);
+    size_t o = 0;
+    for (size_t i = 0; in[i]; i++) {
+        unsigned char prev = i > 0 ? (unsigned char)in[i - 1] : 0;
+        unsigned char next = (unsigned char)in[i + 1];
+        if (in[i] == '.' && prev >= '0' && prev <= '9' && next >= '0' && next <= '9') {
+            out[o++] = (char)0xE7; out[o++] = (char)0x82; out[o++] = (char)0xB9;  /* 点 */
+            continue;
+        }
+        out[o++] = in[i];
+    }
+    out[o] = 0;
+    return out;
+}
+
 static void *yd_stream_start(void *session, const char *voice_key, const char *text,
                              int rate, int pitch, int32_t *out_sample_rate) {
     yd_ctx *c = session;
@@ -639,7 +667,9 @@ static void *yd_stream_start(void *session, const char *voice_key, const char *t
     }
 
     pcmbuf out = {0};
-    int rc = yd_walk_locked(c, text, &out);
+    char *expanded = yd_expand_decimal(text);   /* 数字间 "." → "点" (引擎丢弃点号) */
+    int rc = yd_walk_locked(c, expanded ? expanded : text, &out);
+    free(expanded);
     pthread_mutex_unlock(&c->lock);
     if (rc != 0) return NULL;
     yd_apply_prosody(&out, rate, pitch);
