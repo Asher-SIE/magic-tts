@@ -16,15 +16,22 @@ struct SchemeVoiceConfig: Codable, Equatable {
     var rate: Int = 100        // 20...500, 100 = 常速 (桥刻度)
     var pitch: Int = 50        // 0...100, 50 = 常音高
     var volume: Int = 100      // 0...200 (%), 渲染级逐样本增益
+    var eqLow: Int = 0         // -12...12 dB, 三段音色均衡 (0 = 不滤波), 见 Eq3Band
+    var eqMid: Int = 0
+    var eqHigh: Int = 0
 
     init(engine: String, voice: String = "", autoLocale: String,
-         rate: Int = 100, pitch: Int = 50, volume: Int = 100) {
+         rate: Int = 100, pitch: Int = 50, volume: Int = 100,
+         eqLow: Int = 0, eqMid: Int = 0, eqHigh: Int = 0) {
         self.engine = engine
         self.voice = voice
         self.autoLocale = autoLocale
         self.rate = rate
         self.pitch = pitch
         self.volume = volume
+        self.eqLow = eqLow
+        self.eqMid = eqMid
+        self.eqHigh = eqHigh
     }
 
     init(from decoder: Decoder) throws {
@@ -35,6 +42,9 @@ struct SchemeVoiceConfig: Codable, Equatable {
         rate = try c.decodeIfPresent(Int.self, forKey: .rate) ?? 100
         pitch = try c.decodeIfPresent(Int.self, forKey: .pitch) ?? 50
         volume = try c.decodeIfPresent(Int.self, forKey: .volume) ?? 100
+        eqLow = try c.decodeIfPresent(Int.self, forKey: .eqLow) ?? 0
+        eqMid = try c.decodeIfPresent(Int.self, forKey: .eqMid) ?? 0
+        eqHigh = try c.decodeIfPresent(Int.self, forKey: .eqHigh) ?? 0
     }
 }
 

@@ -174,17 +174,18 @@ enum EngineRegistry {
                     if done != 0 { break }
                 }
                 guard !segSamples.isEmpty else { continue }
-                // 重采样到 24k + 增益
+                // 重采样到 24k + 增益 + 三段 EQ
                 let stepIn = Double(sr) / outRate
                 let outCount = Int(Double(segSamples.count) / stepIn)
                 let gain = Float(side.volume) / 100.0
+                let eq = Eq3Band(sampleRate: outRate, low: side.eqLow, mid: side.eqMid, high: side.eqHigh)
                 for i in 0..<outCount {
                     let p = Double(i) * stepIn
                     let i0 = Int(p)
                     let frac = Float(p - Double(i0))
                     let a = i0 < segSamples.count ? Float(segSamples[i0]) : 0
                     let b = i0 + 1 < segSamples.count ? Float(segSamples[i0 + 1]) : a
-                    pcm.append((a + (b - a) * frac) / 32768.0 * gain)
+                    pcm.append(eq.process((a + (b - a) * frac) / 32768.0 * gain))
                 }
             }
             guard pcm.count > 0 else { return }

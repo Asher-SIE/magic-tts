@@ -94,7 +94,7 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
 
     // MARK: - 段队列与音频缓冲 (stateLock 保护; 请求线程写, feeder 读写, 渲染线程读)
 
-    /// 一段 = 一个引擎流. gain 为渲染级逐样本增益 (方案音量).
+    /// 一段 = 一个引擎流. gain 为渲染级逐样本增益 (方案音量); eq* 为该侧三段 EQ 增益.
     private struct SegPlan {
         let engine: String
         let voice: String?      // nil = 引擎默认发音人
@@ -102,6 +102,9 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
         let rate: Int32
         let pitch: Int32
         let gain: Float
+        var eqLow: Int = 0
+        var eqMid: Int = 0
+        var eqHigh: Int = 0
     }
 
     private let stateLock = NSLock()
@@ -300,7 +303,8 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
                 if seg.isolatedCapital { pitch = min(100, pitch + LetterCaseStyle.pitchDelta) }
                 return SegPlan(engine: r.engine, voice: r.voice, text: seg.text,
                                rate: Int32(side.rate), pitch: Int32(pitch),
-                               gain: Float(side.volume) / 100.0)
+                               gain: Float(side.volume) / 100.0,
+                               eqLow: side.eqLow, eqMid: side.eqMid, eqHigh: side.eqHigh)
             }
             NSLog("[MagicTTS] scheme=\(slot) 主=\(p.engine) 副=\(s.engine) 二语音=\(scheme.useSecondary) → \(newPlans.count) 段 text=\(text.prefix(32))")
         } else {
@@ -454,6 +458,8 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
             var segPos = 0.0        // 段内已消费位置 (引擎样本空间, 累计)
             var segBase = 0         // 当前 chunk 在段内的起始样本序
             var prevTail: Float = 0 // 上一 chunk 末样本 (跨 chunk 插值用)
+            var eqFilter = Eq3Band(sampleRate: outRate, low: 0, mid: 0, high: 0) // 当前段三段 EQ (段切换时重建)
+            var eqIdx = -1         // eqFilter 对应的段序
             var probeIdx = -1       // 延迟探针: 已记录到第几段
 
             // 释放本 feeder 启动过且尚未读尽释放的流, 并清掉 streams[] 里的
@@ -534,15 +540,20 @@ public final class MagicSpeechProviderAU: AVSpeechSynthesisProviderAudioUnit {
                             Self.probeLatency(ms, engine: plan.engine, rate: plan.rate,
                                               text: String(plan.text.prefix(16)))
                         }
-                        // 线性换算到输出采样率后追加 (含增益)
+                        // 线性换算到输出采样率后追加 (含增益与三段 EQ)
                         let bufBefore = self.srcBuf.count
                         let step = Double(self.rates.indices.contains(idx) ? self.rates[idx] : 24000) / outRate
+                        if eqIdx != idx {
+                            eqFilter = Eq3Band(sampleRate: outRate, low: plan.eqLow,
+                                               mid: plan.eqMid, high: plan.eqHigh)
+                            eqIdx = idx
+                        }
                         while segPos + 1 < Double(segBase + n) {
                             let i0 = Int(segPos) - segBase
                             let s0: Float = i0 < 0 ? prevTail : Float(scratch[i0]) / 32768.0 * plan.gain
                             let s1: Float = Float(scratch[i0 + 1]) / 32768.0 * plan.gain
                             let frac = Float(segPos - Double(Int(segPos)))
-                            self.srcBuf.append(s0 * (1 - frac) + s1 * frac)
+                            self.srcBuf.append(eqFilter.process(s0 * (1 - frac) + s1 * frac))
                             segPos += step
                         }
                         if self.dumpAudio {

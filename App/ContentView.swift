@@ -194,6 +194,19 @@ struct SchemeEditor: View {
                     get: { Double(side.wrappedValue.volume) },
                     set: { side.wrappedValue.volume = Int($0) }), in: 0...200, step: 1)
             }
+            eqRow("低频", side.eqLow)
+            eqRow("中频", side.eqMid)
+            eqRow("高频", side.eqHigh)
+        }
+    }
+
+    /// 三段音色均衡行: 标签 + 带符号 dB 值 + -12...12 dB 滑块 (0 = 不滤波)。
+    private func eqRow(_ label: String, _ value: Binding<Int>) -> some View {
+        HStack {
+            Text("\(label) \(value.wrappedValue >= 0 ? "+" : "")\(value.wrappedValue)dB")
+            Slider(value: Binding(
+                get: { Double(value.wrappedValue) },
+                set: { value.wrappedValue = Int($0) }), in: -12...12, step: 1)
         }
     }
 
