@@ -205,3 +205,98 @@ zig cc -target x86_64-linux-gnu -std=gnu11 -c -Wall -IBridge/include \
 
 注意 `-std=c11` 严格模式在 glibc 目标下会藏 `clock_gettime`/`strdup` 声明
 (报错属目标差异, macOS 构建不受影响); 用 `-std=gnu11` 与 Darwin 实际可见性对齐。
+
+## 十、Ghidra 逆向实录 (2026-10-20, Windows 快赢, 四轮 headless)
+
+工具链: Ghidra 12.1.4 (`C:\Tools\ghidra_12.1.4_PUBLIC`, JDK 21 于
+`C:\Tools\jdk-21`, `launch.properties` 已设 `JAVA_HOME_OVERRIDE`)。
+.ghidra 工程已分析存盘 (`C:\Tools\aisound-re\ghidra-proj`, 3467 函数,
+Ghidra 自动套用 `rust-common` 类型档案), 后续轮次 `-process -noanalysis`
+秒进。脚本: `tools/ghidra_dump_aisound{,2,3,4}.java` (Java 版 — headless
+默认无 PyGhidra, .py 不可用)。dump 输出: `C:\Tools\aisound-re\dumps\`。
+REA 注意: 其 Windows Ghidra 桥只准入 x86/x64 PE, 本 .so (arm64 ELF) 进
+不去 — REA 分析须在 macOS 侧。
+
+### 10.1 RegisterNatives 全表 (JNI 名 → native 实现, 均在 0x25xxxx JNI 簇)
+
+| 方法 | native | 方法 | native |
+|---|---|---|---|
+| open | `switchD_0025a7d8::caseD_3d` | setStyle | `FUN_0025bdf8` |
+| close | `FUN_0025ae90` | stretch | `FUN_0025b4c0` |
+| speak | `FUN_0025aee4` | voiceFx | `FUN_0025bb88` |
+| **speakStream** | **`FUN_0025d07c`** | trimNew/Free/Push/EndClause/Finish | `0059bae0`/`0025c180`/`0025c210`/`0025d7e8`/`0025cf8c` |
+| lastPanic | `FUN_0025c5bc` | speedNew/Free/Push/Flush | `0025bedc`/`0025c80c`/`0025c8a4`/`0025cc40` |
+| loudness | `FUN_0025babc` | applyGain | `FUN_0025c3f8` |
+
+(方法名/签名是 Rust 切片拼进 .rodata 字符串池的, 按长度+签名比对落位;
+JNI 簇 crate = `aisound_android/src/lib.rs`。)
+
+### 10.2 引擎架构真相 — 不是复刻, 是 "lift"(二进制提升)
+
+.oredata 内嵌两个 AIRZ 加密块, 解密后分别为:
+- `0x122277` + 0x3037e B → **原厂争渡 AiSound 的 PE 镜像** (panic 标签
+  `"zd_pe_image"`, crate `aisound_zd/src/engine.rs`), 由
+  `aisound_lift/src/rt.rs` 自研运行时执行 (0x1000 分页内存表, FUN_0026a154);
+- `0x1e5ba3` + 0x8283 B → lift 运行时表 (`aisound_lift/src/rt.rs`)。
+
+**open() 分叉** (caseD_3d 反编译):
+- **mode 1-5** (晓燕/晓美/Catherine/小风/大龙) → `FUN_008d440c`: 解
+  Resource.irf 条目 0 → 内含 **`IsResV4` 目录** (魔数 `IsResV4` +
+  0x18B 行, 行首双魔数 `0x074a358fa2b4c6d1`/`0x190a3f7e2a5c1e9b`), mode 4/5
+  按 8/6 字符音色名在目录里选条目装入 zd 运行时; 产物 = 0x2a8 结构;
+- **mode 6-8** (永德彦萍/雨峰/小美) → `FUN_0059ae20 → FUN_008d3f9c(条目
+  k = mode-5)`: 各自整块喂 **`aisound_yd`** (`src/lib.rs` + `src/arm.rs`
+  = 永德 ARM 代码 lifter, FUN_0059b1a0 建 3MB 竞技场+地址映射, 内存布局
+  硬编码 0x110000/0x12f800/0x2feffc 等页)。
+
+即: **所谓 Rust 引擎 = 原厂 PE/ARM 代码的宿主, 合成算法本体仍是原厂
+二进制**。macOS 意义: 拿 Rust 源重编这条路依旧成立; 但"离线解出数据"
+的价值更大 — 音色单元数据可能像永德 .vl 一样可被我们的纯 C 复刻直
+接消费 (尤其 mode 6-8 本就是永德系音色)。
+
+### 10.3 AIRM 容器最终定论 (修正 §5 的字段对齐)
+
+```
+头 40B:  "AIRM" u32ver(=4) u32hdrlen(=0x28) u32len0 u32off1 u32len1
+         u32off2 u32len2 u32off3 u32len3        ← 7 值是 [头长,长0,位1,长1,位2,长2,位3,长3]
+条目k:   (u32@(8+8k), u32@(12+8k)) = (offset, length); 条目0 = (0x28, len0)
+块 AIRZ: "AIRZ" key:u64@4 crc:u32@12 dec_size:u32@16 crc:u32@20 密文@24
+块 AIRC: 同布局, 只解密不压缩
+处理:    FUN_008d49bc = KDF(头12B: key+crc) → FUN_008d40a8 解密 →
+         FUN_008d5ee0 LZMA-alone 解压 → 校验 CRC32(解压后)==u32@20
+         (FUN_008d440c = 条目0 取块; FUN_008d3f9c = 条目k 取块, 供 yd 路径)
+```
+
+§5 字段表勘误: 旧解的 a/b 实为 key:u64 的两半; c(×2) = CRC32(解压后);
+d = 解压尺寸 — 与本轮反编译完全吻合。块 0 解压后 14.2MB ( zd PE 镜像 +
+IsResV4 音色数据), 块 1-3 各 ~4MB ( 永德三音色 )。
+
+### 10.4 密码学组件 (离线提取的最后一环)
+
+| 组件 | 地址 | 身份 |
+|---|---|---|
+| KDF | `FUN_008d3acc` | 私有 ARX (48 轮, 旋转常量 25/35/30/20/15 随轮 +1, 轮步进 `0xC2B2AE35` = Skein 调度增量, 混合乘 `0x85EBCA6B`), 输入 12B (key:u64+crc:u32) → 256 位密钥; 常量表 8×u64 @ .rodata `0x110fc8` (已提取: `63fe55d2b222a31d 10a51c5e638cb0cf 73b68442032adbf9 9b1c3f40c1225539 83fe45b26523a619 86fd9cdfc4a6241b 00ae02a23d04fb76 9106bf5d0b9a2362`) |
+| 流加密 | `FUN_008d40a8` | **ChaCha20 轮结构** (ror 16/12/8/7 四车道 ×10 双轮, 块计数器从 1 起, 64B 块, NEON 尾处理), 状态字为自定义 (0x10d480..0x10d498: `[0,1,2,3]`… 非
+标准 sigma); crate `aisound_core/src/pack.rs` |
+| 解压 | `FUN_008d5ee0` | LZMA-alone (lzma-rs: 0x8d8284 头解析 + 0x8e97a0 读入 + 0x8d65e8 范围解码) |
+| 校验 | — | 反射 CRC-32 (运行时建表, 表区 0x1fe7c0 为变序表) |
+
+**验证 oracle**: 解密+解压后 CRC32 必须等于块头 +20 — 转写正确性可
+即测。**下一步 (唯一剩余)**: 按汇编逐指令转写 KDF + ChaCha 状态装配
+→ Python 解出全部 4 块 → 解析 IsResV4 目录 (对照 Windows 原厂
+AiSound.dll + NVDA SSN 调用链三方印证)。
+
+### 10.5 speakStream 补充语义 (FUN_0025d07c)
+
+- 引擎内部 **rate 域 0..50** (FUN_0025b384 里 `>0x31 则截 0x32`), JNI 层
+  或 App 侧必有 ×2 映射 (App 已知传 ≥100 为常速 — 精确换算点待查,
+  疑在 speak 的 native `FUN_0025aee4`); pitch 域 0..100。
+- **hasFx 时**: `rate = clamp(rate + fx0基率 - 50, 0, 50)`, `pitch =
+  clamp(pitch + fx1基调 - 50, 0, 100)` → §4 表 fx 三元组实为
+  **(基率, 基调, 基量)** — 久许 0.587=慢读, 唐老鸭 1.2549=高调, 与旧
+  推测一致且现在坐实前两位。
+- 参数经控制码下发: 0x502=rate, 0x503=pitch (FUN_0059bd48, lifted 运行
+  时通道); setStyle 走 `FUN_0059bdec` 同通道。
+- 返回值: 1 = 正常完成, 2 = ChunkListener 回调返回 false 中止。
+- 句柄是 enum: 判别值 0/1 = 两种引擎形态 (FUN_002600c4/FUN_002637a0),
+  其余 = lifted zd 路径 (FUN_0059b048 携回调蹦床 `PTR_FUN_009282e8`)。
