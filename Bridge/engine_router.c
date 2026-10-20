@@ -9,8 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MTTS_MAX_ENGINES 4
-#define MTTS_MAX_VOICES  16
+#define MTTS_MAX_ENGINES 5
+#define MTTS_MAX_VOICES  32
 
 typedef struct {
     mtts_engine_desc desc;
@@ -38,15 +38,17 @@ static const mtts_engine_desc kEngineTable[] = {
     { "yongde",        "永德",       "com.magictts.yongde",       "zh-CN", "libyongde_tts.dylib",                16000 },
     { "naturalvoice",  "自然语音",   "com.magictts.naturalvoice", "zh-CN", "libMicrosoft.CognitiveServices.Speech.core.dylib", 24000 },
     { "onecore",       "OneCore",    "com.magictts.onecore",      "zh-CN", "libMicrosoft.CognitiveServices.Speech.core.dylib", 24000 },
+    { "aisound",       "AiSound",    "com.magictts.aisound",      "zh-CN", "libaisound.dylib",                   16000 },
 };
 #define TABLE_LEN ((int)(sizeof(kEngineTable) / sizeof(kEngineTable[0])))
-#define MTTS_ENGINE_TABLE_MAX 4
-/* 表长若超过槽位数需同步放大 MTTS_MAX_ENGINES (当前 4=满) */
+#define MTTS_ENGINE_TABLE_MAX 5
+/* 表长若超过槽位数需同步放大 MTTS_MAX_ENGINES (当前 5=满) */
 
 /* —— 适配器入口 (各 adapter 文件) —— */
 const mtts_adapter_if *mtts_yongde_adapter(void);   /* yongde_adapter.c (复刻, 无引擎库) */
 const mtts_adapter_if *mtts_ms_adapter(void);       /* ms_embedded_adapter.c (naturalvoice + onecore) */
 const mtts_adapter_if *mtts_kona_adapter(void);     /* kona_adapter.m (系统 Eloquence, 见 NOTES-vvtts 十三) */
+const mtts_adapter_if *mtts_aisound_adapter(void);  /* aisound_adapter.c (Rust 复刻引擎, 见 NOTES-aisound) */
 
 const mtts_adapter_if *mtts_adapter_for(const char *key) {
     if (!key) return NULL;
@@ -54,6 +56,7 @@ const mtts_adapter_if *mtts_adapter_for(const char *key) {
     if (strcmp(key, "naturalvoice") == 0 || strcmp(key, "onecore") == 0)
         return mtts_ms_adapter();
     if (strcmp(key, "kona") == 0) return mtts_kona_adapter();
+    if (strcmp(key, "aisound") == 0) return mtts_aisound_adapter();
     return NULL;
 }
 

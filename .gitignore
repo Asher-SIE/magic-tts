@@ -4,6 +4,7 @@ VoAssist/
 # 引擎物料大二进制不入库 (resources/engines 仅备份/开发, 文本词典跟踪)
 resources/ms-voices/
 resources/engines/yongde/voices/
+resources/engines/aisound/
 resources/engines/*/model/
 resources/engines/**/*.dylib
 grtts/

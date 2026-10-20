@@ -54,7 +54,8 @@ enum EngineImporter {
         throw ImportError("未找到引擎物料 (需含 yongde/… 或 Engines/ 目录): \(dir.path)")
     }
 
-    /// 目录下是否有引擎物料子目录 (yongde: voices/; MS: model/ + dylib)
+    /// 目录下是否有引擎物料子目录 (yongde: voices/; MS: model/ + dylib;
+    /// aisound: Resource.irf)
     private static func hasEngineChild(_ dir: URL) -> Bool {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return false }
@@ -67,6 +68,7 @@ enum EngineImporter {
             }
             let files = (try? fm.contentsOfDirectory(atPath: child.path)) ?? []
             return files.contains("voices") || files.contains("model")
+                || files.contains("Resource.irf")
                 || files.contains { $0.hasSuffix(".dylib") }
         }
     }

@@ -12,6 +12,7 @@ macOS 多引擎中文语音合成器 — 通过 `AVSpeechSynthesisProviderAudioU
 | 自然语音·晓晓 HD / 晓臻 / 云哲 | `naturalvoice` | 微软嵌入式神经网络（流式） | zh-CN / zh-TW | 24 kHz |
 | OneCore·晓晓 HD / Andrew HD / Ava HD / Eric / Michelle | `onecore` | 微软嵌入式神经网络（流式） | zh-CN / en-US | 24 kHz |
 | Eddy/Flo/奶奶/爷爷/Reed/Rocko/Sandy/Shelley × 中英 (Kona) | `kona` | **系统内置 Eloquence/ViaVoice 直驱**（进程内，零物料依赖） | zh-CN / en-US | 16 kHz |
+| 晓燕/晓美/Catherine/小风/大龙/许久/许多/唐老鸭/永德系列 等 18 条 | `aisound` | 讯飞风格 Rust 复刻引擎（PSOLA + Resource.irf；**待 macOS 引擎库**，见 `docs/NOTES-aisound.md`） | zh-CN / zh-HK / en-US | 16 kHz |
 
 - 永德：`voices/` 下每个 `ydvoiceNN.vl` 就是一个发音人，首次使用某发音人时加载；
 - MS 引擎：`model/` 下每个含 `SynthModel.license` 或 `SynthModel.key` 的包 = 一个
@@ -167,7 +168,8 @@ resources/
 ├── engines/                              # 引擎物料备份/开发源 (package-zip.sh 打入分发 zip)
 │   ├── yongde/                           #   53M: voices/*.vl + 拼音词典 (词典入 git)
 │   ├── naturalvoice/                     #  444M: dylib + model/ (二进制未入 git)
-│   └── onecore/                          #  1.3G: dylib + model/ (二进制未入 git)
+│   ├── onecore/                          #  1.3G: dylib + model/ (二进制未入 git)
+│   └── aisound/                          #    17M: Resource.irf (未入 git; 来源与 ABI 见 docs/NOTES-aisound.md)
 └── ms-voices/                            # NeuralVoices 微软语音包离线备份 (1.4G, 14 包 / 7 个 license 型, 未入 git)
 ```
 
