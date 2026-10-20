@@ -150,3 +150,43 @@ int        as_speak_stream(long handle, const char *utf8_text,
   `NativeOut` (OpenSL 原生 sink, 失败回退 AudioTrack)。
   ≈ 本仓库馈送线程尾静音裁剪 + 渲染级增益 + Sonic。
 - 引擎失败自愈: close → 池移除 → 重开 (§2.3)。
+
+## 八、引擎血统与 Windows 版 (2026-10-20 补查, NVDA 插件包实证)
+
+NVDA 中文站有 [Sunshine AiSound 合成器](https://www.nvdacn.com/index.php/archives/1588/)
+(0.1.1, 普通话/粤语/英语 = 晓燕/晓美/Catherine)。解包
+`SunshineAISound-0.1.1.nvda-addon` (zip) 得:
+
+| 文件 | 真身 |
+|---|---|
+| `AiSound.dll` (326KB, x64 PE) | **原厂引擎** (非 Rust 复刻): .strings 含讯飞标记 `IFLYTEKKETYLFI`; PDB 路径 `D:\ScreenReader\bin\Release\plugins\TTS\AiSound.pdb` — 某国产读屏器的 TTS 插件 (与争渡读屏 aisound.dll 补丁帖互证) |
+| `SSNAPI.dll` (84KB) | 兼容宿主: 把原厂插件桥给 NVDA (装音频钩子捕获 PCM) |
+| `TTS/AiSound/Resource.irf` (6.7MB) | 原厂资源, **容器是 `IsResV4` 代** — 与安卓包的 `AIRM` v4 (17.9MB, 8 模式) 是两代封装; 引擎运行时按 `SsnGetPath` 给的插件目录自读 |
+| `sunshine.py` / `_engine.py` | Python 驱动源码, Windows 调用链全部可读 |
+
+**结论: 血统 = 讯飞系原厂引擎 (Windows 插件) → 安卓 Rust 复刻 (AIRM 重打包)
+→ 我们要的 Darwin 版两者都没有公开产物。**
+
+Windows 侧调用链 (与安卓 JNI 层完全不同的另一套 API, 备查):
+`SSNAPI`: `SsnInstallAudioHook`/`SsnSetAudioCallback`(PCM 16k/16bit/mono
+回调)/`SsnSetStatusCallback`(token+状态机)/`SsnGetFuncById(id)` 按号取函数 —
+6=openVoice 7=closeVoice 8=speak(voiceId,wtext,token) 10=stop
+11..18=get/set volume/pitch/rate/device (NVDA 百分制 0..100,
+默认 rate 50/pitch 50/vol 100, speak 前逐段 set);
+`AiSound.dll`: `PiPlugInEntry`/`PiInit`/`PiUnInit`。
+voiceId: `xiaoyan`/`xiaomei`/`catherine` (via `SsnRegisterVoiceInfo` 注册)。
+
+## 九、编译验证 (Windows 侧)
+
+本机无 Mac, 用 winget 全局安装的 zig 0.17 (`zig cc` 内置 clang+跨平台头)
+对 Bridge 做真编译验证 (2026-10-20, 全部通过):
+
+```bash
+zig cc -target x86_64-linux-gnu -std=gnu11 -c -Wall -IBridge/include \
+    Bridge/<file>.c -o /tmp/<file>.o
+# aisound_adapter.c / engine_router.c: 零告警
+# yongde_adapter.c / ms_embedded_adapter.c: 仅既有告警 (未动)
+```
+
+注意 `-std=c11` 严格模式在 glibc 目标下会藏 `clock_gettime`/`strdup` 声明
+(报错属目标差异, macOS 构建不受影响); 用 `-std=gnu11` 与 Darwin 实际可见性对齐。
